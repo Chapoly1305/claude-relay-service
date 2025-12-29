@@ -1,0 +1,199 @@
+version: '3.8'
+
+# Isolated Fuzzing Environment for Claude Relay Service
+# Provides completely isolated environment for security testing
+# Network: internal (no external access)
+# Data: ephemeral (tmpfs, auto-cleanup)
+# Safety: pre-flight checks + resource limits
+
+services:
+  # 🧪 Claude Relay Service - Test Instance (isolated)
+  test_relay:
+    build: ../..
+    image: claude-relay-service:test
+    container_name: fuzzing_test_relay
+    restart: no
+    ports:
+      # ⚠️ SECURITY: Localhost binding only (127.0.0.1)
+      - "127.0.0.1:13000:3000"
+    environment:
+      # 🔧 Node Configuration
+      NODE_ENV: testing
+      PORT: 3000
+      HOST: 0.0.0.0
+
+      # 🔐 Security - TEST CREDENTIALS ONLY (NOT PRODUCTION)
+      JWT_SECRET: "test_jwt_secret_for_fuzzing_only_32chars_minimum"
+      ENCRYPTION_KEY: "test_encryption_key_32_chars_!!"
+      ADMIN_SESSION_TIMEOUT: 86400000
+
+      # 📊 Redis Configuration
+      REDIS_HOST: test_redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+
+      # 👤 Admin Credentials (for seeding)
+      ADMIN_USERNAME: "test_admin"
+      ADMIN_PASSWORD: "test_password_123"
+
+      # 📝 Logging
+      LOG_LEVEL: info
+      DEBUG: "false"
+
+      # 🌐 API Configuration
+      CLAUDE_API_URL: "https://api.anthropic.com/v1/messages"
+      CLAUDE_API_VERSION: "2023-06-01"
+
+      # ⏱️ Timeouts
+      REQUEST_TIMEOUT: 60000
+      DEFAULT_PROXY_TIMEOUT: 60000
+
+      # 📈 Limits
+      REQUEST_MAX_SIZE_MB: 60
+      DEFAULT_TOKEN_LIMIT: 1000000
+
+      # ✅ Features
+      ENABLE_CORS: "true"
+      TRUST_PROXY: "false"
+
+      # 🔧 System
+      CLEANUP_INTERVAL: 3600000
+      HEALTH_CHECK_INTERVAL: 60000
+
+    volumes:
+      # Ephemeral temp directory
+      - /tmp
+
+    depends_on:
+      test_redis:
+        condition: service_healthy
+
+    networks:
+      - fuzzing_net
+
+    # 🎯 Health Check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+    # ⚖️ Resource Limits
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2.0
+
+  # 📦 Redis - Test Instance (ephemeral)
+  test_redis:
+    image: redis:7-alpine
+    container_name: fuzzing_test_redis
+    restart: no
+    # ⚠️ SECURITY: Exposed only on internal network (not to host)
+    expose:
+      - "6379"
+
+    # 📊 Ephemeral storage (tmpfs - auto-cleanup on shutdown)
+    tmpfs:
+      - /data:noexec,nosuid,size=512m
+
+    # ⚠️ IMPORTANT: Disable persistence for test instance
+    command: redis-server --save "" --appendonly no
+
+    networks:
+      - fuzzing_net
+
+    # 🎯 Health Check
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+    # ⚖️ Resource Limits
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+
+  # 🔒 OWASP ZAP - Security Scanner
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: fuzzing_zap
+    restart: no
+    # ⚠️ SECURITY: Internal network only (no external access)
+    expose:
+      - "8080"
+
+    # ZAP daemon mode for API access
+    command:
+      - zap.sh
+      - -daemon
+      - -host
+      - "0.0.0.0"
+      - -port
+      - "8080"
+      - -config
+      - api.disablekey=true
+
+    networks:
+      - fuzzing_net
+
+    depends_on:
+      test_relay:
+        condition: service_healthy
+
+    # ⏱️ Give ZAP time to start
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+    # ⚖️ Resource Limits (ZAP can be memory-intensive)
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 2.0
+
+# 🌐 Network Configuration
+networks:
+  fuzzing_net:
+    driver: bridge
+    # ⚠️ CRITICAL SECURITY: Internal network prevents any external access
+    internal: true
+
+# 📌 Notes for Security Auditors
+#
+# Safety Guarantees:
+# 1. Network Isolation:
+#    - internal: true prevents all external communication
+#    - Services can only communicate with each other
+#    - No routes to internet or host network
+#
+# 2. Data Isolation:
+#    - Redis uses tmpfs (ephemeral memory storage)
+#    - No persistent volumes
+#    - Auto-cleanup on container shutdown
+#
+# 3. Test Credentials:
+#    - All credentials are hardcoded test values
+#    - Pre-flight checks reject production credentials
+#    - Hostnames are container-local
+#
+# 4. Resource Protection:
+#    - Memory limits prevent runaway processes
+#    - CPU limits prevent DoS
+#    - Per-container resource constraints
+#
+# 5. Access Control:
+#    - Port 13000 bound to 127.0.0.1 (localhost only)
+#    - ZAP not exposed to host
+#    - Redis not exposed to host
+#
+# Verification:
+# - Run pre-flight-check.sh before starting
+# - Verify network: docker network inspect fuzzing_net
+# - Verify isolation: docker exec fuzzing_test_relay_1 curl -f google.com
+#   (Should fail - indicates network isolation working)

@@ -1,0 +1,15 @@
+# Python Dependencies for Claude Relay Fuzzing Tools
+#
+# Install: pip install -r requirements.txt
+
+# HTTP requests for fuzzing
+requests>=2.31.0
+
+# Colorized terminal output
+colorama>=0.4.6
+
+# JSON processing
+# (built-in, no requirement needed)
+
+# Optional: For advanced reporting
+python-json-logger>=2.0.7

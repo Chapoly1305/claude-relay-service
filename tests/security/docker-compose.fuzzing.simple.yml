@@ -1,0 +1,59 @@
+version: '3.8'
+
+# Simplified Fuzzing Environment (without ZAP - avoids keychain issue)
+
+services:
+  test_relay:
+    build: ../..
+    image: claude-relay-service:test
+    container_name: fuzzing_test_relay
+    restart: no
+    ports:
+      - "127.0.0.1:13000:3000"
+    environment:
+      NODE_ENV: testing
+      PORT: 3000
+      HOST: 0.0.0.0
+      JWT_SECRET: "test_jwt_secret_for_fuzzing_only_32chars_minimum"
+      ENCRYPTION_KEY: "test_encryption_key_32_chars_!!"
+      REDIS_HOST: test_redis
+      REDIS_PORT: 6379
+      LOG_LEVEL: info
+    depends_on:
+      test_redis:
+        condition: service_healthy
+    networks:
+      - fuzzing_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: 2g
+    cpus: 2.0
+
+  test_redis:
+    image: redis:7-alpine
+    container_name: fuzzing_test_redis
+    restart: no
+    expose:
+      - "6379"
+    tmpfs:
+      - /data:noexec,nosuid,size=512m
+    command: redis-server --save "" --appendonly no
+    networks:
+      - fuzzing_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    mem_limit: 512m
+    cpus: 1.0
+
+networks:
+  fuzzing_net:
+    driver: bridge
+    internal: true

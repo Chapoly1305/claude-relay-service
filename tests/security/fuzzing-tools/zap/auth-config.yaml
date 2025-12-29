@@ -1,0 +1,122 @@
+# OWASP ZAP Configuration for Claude Relay Service Authentication Testing
+#
+# This configuration sets up ZAP baseline scanning with proper authentication
+# for admin and user endpoints.
+#
+# Usage:
+#   zap-baseline.py -t http://test_relay:3000 -c auth-config.yaml -d
+
+env:
+  # Context configuration
+  contexts:
+    - name: "Claude Relay Admin Context"
+      description: "Admin and user management endpoints"
+      urls:
+        - "http://test_relay:3000/admin/.*"
+        - "http://test_relay:3000/users/.*"
+        - "http://test_relay:3000/web/.*"
+
+      # Authentication method
+      authentication:
+        method: "scriptBasedAuthentication"
+        loginUrl: "http://test_relay:3000/web/auth/login"
+        loginRequestUrl: "http://test_relay:3000/web/auth/login"
+        loginRequestBody: "username=test_admin&password=test_password_123"
+
+      # Session management
+      sessionManagement:
+        method: "tokenBasedSessionManagement"
+        parameters:
+          headerName: "Authorization"
+          tokenName: "adminToken"
+
+      # Scope
+      includeInScope: true
+      excludeInScope: false
+
+  # Scanning policies
+  scanners:
+    - name: "OWASP API Baseline"
+      policy: "API-Minimal-OWASP_2021"
+      scanners:
+        # Cross Site Scripting
+        - id: 40012
+          enabled: true
+
+        # Cross Site Request Forgery
+        - id: 40013
+          enabled: true
+
+        # Session Fixation
+        - id: 40018
+          enabled: true
+
+        # SQL Injection
+        - id: 40014
+          enabled: true
+
+        # Authentication Bearer Token
+        - id: 100001
+          enabled: true
+
+        # Missing Security Headers
+        - id: 10010
+          enabled: true
+          config:
+            name: "Missing Anti-CSRF Tokens"
+            pluginId: 90020
+
+  # Spider configuration
+  spider:
+    maxDuration: 5  # 5 minutes max
+    maxChildren: 50
+    maxDepth: 3
+    followRedirects: true
+
+  # Report options
+  report:
+    format: "html"
+    reportTitle: "Claude Relay Service Security Assessment"
+    reportDescription: "Baseline security scan with authentication"
+    sections:
+      - "Summary"
+      - "Alert Details"
+      - "Passing Rules"
+
+# Rules configuration
+rules:
+  # Configure alert levels
+  alert:
+    confidenceThreshold: "MEDIUM"
+    riskThreshold: "MEDIUM"
+
+  # Scanner rules
+  scripts:
+    enabled: true
+    includeExamples: false
+
+  # Authentication rules
+  authentication:
+    - name: "Test Admin Login"
+      method: "form"
+      url: "http://test_relay:3000/web/auth/login"
+      parameters:
+        username: "test_admin"
+        password: "test_password_123"
+
+# Exclusions (paths/patterns to skip)
+exclusions:
+  urls:
+    - ".*health.*"
+    - ".*metrics.*"
+    - ".*\\.log$"
+    - ".*\\.json$"
+
+# Passive scan configuration
+passiveScan:
+  enabled: true
+  scanOnlyInScope: true
+  maxRuleDuration: 5
+
+# Request timeout settings
+requestTimeout: 30

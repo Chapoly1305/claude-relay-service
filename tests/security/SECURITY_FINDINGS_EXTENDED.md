@@ -11,12 +11,14 @@
 | Test Category | Status | Issues | Severity |
 |---|---|---|---|
 | **CVE-1: Missing Field Validation** | ✅ FIXED | 0 | - |
-| **Token Security** | ⚠️ WARNINGS | 1 | Medium |
-| **Privilege Escalation** | 🚨 CRITICAL | 2 | **CRITICAL** |
+| **CWE-613: Session Expiration** | 🚨 CRITICAL | 1 | **CRITICAL** |
 | **Horizontal Privilege (IDOR)** | ✅ PROTECTED | 0 | - |
+| **Token Tampering** | ✅ PROTECTED | 0 | - |
 | **Injection Attacks** | ✅ PROTECTED | 0 | - |
 
-**Total Vulnerabilities**: 3 (2 Critical, 1 Medium)
+**Total Vulnerabilities**: 1 Critical
+
+**Note**: CWE-269 (User to Admin Elevation) was initially reported but invalidated after clarifying system architecture - system only has admin users, no regular user concept.
 
 ---
 
@@ -58,50 +60,90 @@ Actual: 200 OK ❌
 
 ---
 
-### 3. 🚨 CWE-269: Improper Access Control - User to Admin Elevation
+### 3. 🚨 CWE-613: Inconsistent Session Expiration Validation
 **Severity**: CRITICAL
 **Status**: CONFIRMED VULNERABILITY ❌
 
-**Finding 1**: Missing Admin Field Requirement
-A session token missing the `adminId` field can still access `/admin/` endpoints.
+**Background**:
+System architecture: Only admin users exist (no regular user concept). All sensitive endpoints like `/admin/api-keys`, `/admin/webhook/config` must validate admin sessions.
 
+**Finding**: Inconsistent Expiration Checks Between Middleware
+Two middleware functions handle admin authentication, but only one validates session expiration:
+
+**Function 1: `authenticateAdmin` (lines 1348-1459)**:
+```javascript
+// DOES have expiration validation ✅
+const now = new Date()
+const lastActivity = new Date(adminSession.lastActivity || adminSession.loginTime)
+const inactiveDuration = now - lastActivity
+const maxInactivity = 24 * 60 * 60 * 1000 // 24小时
+
+if (inactiveDuration > maxInactivity) {
+    return 401  // Rejects expired sessions
+}
 ```
-Test: Session with username+loginTime but NO adminId
-Token: partial_adminid_token_with_proper_testing_length
-Endpoint: /admin/api-keys
-Expected: 401 Forbidden
-Actual: 200 OK ❌
+
+**Function 2: `authenticateUserOrAdmin` (lines 1548+)**:
+```javascript
+// DOES NOT have expiration validation ❌
+if (!adminSession.username || !adminSession.loginTime) {
+    // Only validates presence of fields
+    return 401
+}
+// No check for how old the token is!
+// Accepts tokens regardless of age
+return next()  // Grants access to expired session
 ```
 
-**Finding 2**: Inconsistent Authorization
-The middleware only validates `username` and `loginTime`, but doesn't enforce that admin operations require an `adminId` or `admin` flag.
+**Vulnerable Endpoints**:
+These endpoints use `authenticateUserOrAdmin` without expiration check:
+- `/users/` ❌
+- `/users/stats/overview` ❌
+- `/admin/api-keys` ❌
+- `/admin/webhook/config` ❌
 
-**Impact**:
-- Any authenticated session (even partial) can access admin endpoints
-- No distinction between regular users and admin users
-- All 4 admin endpoints affected:
-  - `/admin/api-keys` ❌
-  - `/admin/webhook/config` ❌
-  - `/admin/dashboard` ❌
-  - `/users/stats/overview` ❌
+**Test Evidence**:
+```
+Test: Expired token (25+ hours old)
+Token: expired_session_token_with_proper_testing_length
+Session data: { username: 'test_admin', loginTime: '2025-12-04T...' }  // 25h old
+Endpoint: /users/
+Expected: 401 Unauthorized (token too old)
+Actual: 200 OK ❌ (session accepted despite being expired)
+```
 
 **Root Cause**:
+`authenticateUserOrAdmin` middleware (line 1570) validates only field presence, not token age:
 ```javascript
-// Current behavior - INCOMPLETE CHECK
+// Missing expiration check like authenticateAdmin has (lines 1404-1419)
 if (!adminSession.username || !adminSession.loginTime) {
-    return 401  // Only checks for username/loginTime
+    return 401
 }
-// Does NOT check for adminId or admin flag
-// Allows any session with username+loginTime to proceed
+// ⚠️ No validation of:
+// - How old the loginTime is
+// - lastActivity timestamp
+// - inactivity duration
 ```
 
+**Security Impact**:
+- Admin sessions can be used indefinitely after creation
+- If an admin token is leaked/stolen, attacker has permanent access
+- No automatic session timeout protection
+- Violates 24-hour inactivity requirement from `authenticateAdmin`
+
 **Recommended Fix**:
+Apply same expiration logic to `authenticateUserOrAdmin` as `authenticateAdmin`:
 ```javascript
-// Proper admin validation
-if (!adminSession.username || !adminSession.loginTime || !adminSession.adminId) {
-    return 401  // REQUIRES all three fields
+// Add to authenticateUserOrAdmin after line 1570
+const now = new Date()
+const lastActivity = new Date(adminSession.lastActivity || adminSession.loginTime)
+const inactiveDuration = now - lastActivity
+const maxInactivity = 24 * 60 * 60 * 1000
+
+if (inactiveDuration > maxInactivity) {
+    await redis.deleteSession(adminToken)
+    return 401  // Reject expired session
 }
-// Additional: Verify adminId is valid/active
 ```
 
 ---
@@ -141,18 +183,30 @@ All token tampering attempts rejected:
 
 ## Attack Chain Scenario
 
-An attacker can exploit these vulnerabilities in the following way:
+An attacker can exploit the expired token vulnerability:
 
 ```
-1. Attacker registers regular user account
-2. Obtains valid user session token (has username + loginTime)
-3. Directly accesses /admin/api-keys endpoint with user token
-4. Can now view, create, or manage API keys (admin function)
-5. Can configure webhooks targeting external attackers
-6. Can monitor all user requests through admin dashboard
+1. Attacker compromises admin session token through:
+   - Session interception/MITM attack
+   - Leaked token from logs/files
+   - Social engineering
+
+2. Attacker captures token with loginTime from 24+ hours ago
+   (Token = expired_session_token_with_proper_testing_length)
+
+3. Attacker sends request to /users/ or /admin/api-keys with expired token
+   - authenticateUserOrAdmin middleware accepts it (no expiration check)
+   - authenticateAdmin would reject it (has 24h timeout)
+
+4. Attacker gains access to sensitive endpoints:
+   - /users/stats/overview - View system statistics
+   - /admin/api-keys - Manage API keys
+   - /admin/webhook/config - Configure webhooks
+
+5. Attacker maintains indefinite access (tokens never expire in these endpoints)
 ```
 
-**Impact**: Complete privilege escalation to admin level.
+**Impact**: Permanent access to admin functions even after session should have timed out. Violates security principle of automatic session expiration.
 
 ---
 
@@ -160,8 +214,7 @@ An attacker can exploit these vulnerabilities in the following way:
 
 | Issue | Priority | Effort | Risk if Unfixed |
 |---|---|---|---|
-| **Missing adminId check** | 🔴 CRITICAL | LOW (1 line) | Immediate privilege escalation |
-| **Session expiration** | 🟡 MEDIUM | MEDIUM (10 lines) | Session hijacking window |
+| **Inconsistent session expiration** | 🔴 CRITICAL | LOW (~8 lines) | Indefinite admin access after token compromise |
 
 ---
 
@@ -169,16 +222,15 @@ An attacker can exploit these vulnerabilities in the following way:
 
 ```
 Total Tests Run: 6 Categories
-├── Authentication Bypass Regression: 32/32 ✅
-├── Token Security: 20/20 ✅ + 1 warning
-├── Privilege Escalation: 10/12 ❌ (2 critical failures)
+├── Authentication Bypass Regression: 32/32 ✅ (CVE-1 Fixed)
+├── Token Security: 21/22 ❌ (1 Critical: Expired token accepted)
 ├── Horizontal Privilege (IDOR): 25/25 ✅
+├── Token Tampering: 4/4 ✅
 ├── Injection Attacks: 0/0 ✅ (all protected)
-└── Token Tampering: 4/4 ✅
+└── Session Expiration: 1 Critical Found ❌
 
-Vulnerabilities Found: 3
-- 2 Critical
-- 1 Medium
+Vulnerabilities Found: 1 Critical
+- CWE-613: Inconsistent session expiration between authenticateUserOrAdmin and authenticateAdmin
 ```
 
 ---
@@ -196,19 +248,26 @@ Generated test scripts available in:
 ## Recommendations
 
 ### Immediate (Critical)
-1. Add adminId validation in authenticateUserOrAdmin middleware
-2. Implement proper role-based access control (RBAC)
-3. Add admin flag/role field to session validation
+1. **Add session expiration check to authenticateUserOrAdmin middleware**
+   - Location: `src/middleware/auth.js`, lines 1548-1610
+   - Copy expiration logic from `authenticateAdmin` (lines 1404-1419)
+   - Apply same 24-hour inactivity check before granting access
+   - Test with expired token to verify rejection (401 response)
 
-### Short-term (Medium)
-1. Implement session expiration checks
-2. Add token refresh mechanism for long-lived sessions
-3. Consider JWT tokens with exp claim
+### Verification Steps
+1. Run fuzz-auth-tokens.py to verify expired token is rejected
+2. Ensure test `test_expired_token_acceptance()` returns failure (token rejected)
+3. Verify all endpoints using authenticateUserOrAdmin now validate expiration:
+   - `/users/`
+   - `/users/stats/overview`
+   - `/admin/api-keys`
+   - `/admin/webhook/config`
 
-### Long-term (Low)
-1. Implement comprehensive RBAC system
-2. Add audit logging for admin operations
-3. Consider OAuth2 for better token management
+### Future Enhancements (Low Priority)
+1. Add token refresh mechanism with sliding expiration window
+2. Implement audit logging for admin session access
+3. Consider JWT tokens with exp claim for better token lifecycle management
+4. Add optional Redis session store with TTL for automatic expiration
 
 ---
 

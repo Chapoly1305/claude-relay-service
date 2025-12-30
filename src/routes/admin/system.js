@@ -271,6 +271,7 @@ const defaultOemSettings = {
   publicStatsShowTokenTrends: false, // 显示Token使用趋势
   publicStatsShowApiKeysTrends: false, // 显示API Keys使用趋势
   publicStatsShowAccountTrends: false, // 显示账号使用趋势
+  publicStatsTrendsPeriod: '7d', // 使用趋势时间范围: today, 24h, 7d, 30d
   publicStatsShowSessionWindow: false, // 显示账户会话窗口（负载情况）
   updatedAt: new Date().toISOString()
 }
@@ -325,6 +326,7 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowTokenTrends,
       publicStatsShowApiKeysTrends,
       publicStatsShowAccountTrends,
+      publicStatsTrendsPeriod,
       publicStatsShowSessionWindow
     } = req.body
 
@@ -359,6 +361,12 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       ? publicStatsModelDistributionPeriod
       : 'today'
 
+    // 验证趋势时间范围值（趋势不支持'all'，因为数据量太大）
+    const validTrendsPeriods = ['today', '24h', '7d', '30d']
+    const trendsPeriodValue = validTrendsPeriods.includes(publicStatsTrendsPeriod)
+      ? publicStatsTrendsPeriod
+      : '7d'
+
     const settings = {
       siteName: siteName.trim(),
       siteIcon: (siteIcon || '').trim(),
@@ -371,6 +379,7 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowTokenTrends: publicStatsShowTokenTrends === true, // 默认为false
       publicStatsShowApiKeysTrends: publicStatsShowApiKeysTrends === true, // 默认为false
       publicStatsShowAccountTrends: publicStatsShowAccountTrends === true, // 默认为false
+      publicStatsTrendsPeriod: trendsPeriodValue, // 趋势时间范围
       publicStatsShowSessionWindow: publicStatsShowSessionWindow === true, // 默认为false，显示账户会话窗口
       updatedAt: new Date().toISOString()
     }
@@ -592,13 +601,15 @@ router.get('/public-stats', async (req, res) => {
       publicStats.modelDistributionPeriod = modelStats.period
     }
 
-    // 获取趋势数据（最近7天）
+    // 获取趋势数据
     if (
       settings.publicStatsShowTokenTrends ||
       settings.publicStatsShowApiKeysTrends ||
       settings.publicStatsShowAccountTrends
     ) {
-      const trendData = await getPublicTrendData(settings)
+      const trendsPeriod = settings.publicStatsTrendsPeriod || '7d'
+      const trendData = await getPublicTrendData(settings, trendsPeriod)
+      publicStats.trendsPeriod = trendData.period
       if (settings.publicStatsShowTokenTrends && trendData.tokenTrends) {
         publicStats.tokenTrends = trendData.tokenTrends
       }
@@ -750,19 +761,41 @@ async function getPublicModelStats(period = 'today') {
   }
 }
 
-// 获取公开趋势数据的辅助函数（最近7天）
-async function getPublicTrendData(settings) {
+// 获取公开趋势数据的辅助函数
+// period: 'today' | '24h' | '7d' | '30d'
+async function getPublicTrendData(settings, period = '7d') {
   const result = {
     tokenTrends: null,
     apiKeysTrends: null,
-    accountTrends: null
+    accountTrends: null,
+    period: period
   }
 
   try {
     const client = redis.getClientSafe()
-    const days = 7
 
-    // 生成最近7天的日期列表
+    // 根据period确定天数
+    // 注意：数据按天聚合存储，'24h'需要包含今天+昨天以确保覆盖完整24小时
+    // 这样无论用户在哪个时区，都能看到至少24小时的数据
+    let days
+    switch (period) {
+      case 'today':
+        days = 1 // 仅今天（服务器时区）
+        break
+      case '24h':
+        days = 2 // 今天+昨天，确保覆盖完整24小时（跨时区场景）
+        break
+      case '7d':
+        days = 7
+        break
+      case '30d':
+        days = 30
+        break
+      default:
+        days = 7
+    }
+
+    // 生成日期列表
     const dates = []
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date()

@@ -1130,7 +1130,7 @@
                     <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
                       >Token 使用趋势</span
                     >
-                    <p class="text-xs text-gray-500 dark:text-gray-400">显示近7天的Token使用量</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">显示Token使用量趋势</p>
                   </div>
                 </label>
                 <label
@@ -1145,9 +1145,7 @@
                     <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
                       >API Keys 活跃趋势</span
                     >
-                    <p class="text-xs text-gray-500 dark:text-gray-400">
-                      显示近7天的活跃API Key数量
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">显示活跃API Key数量趋势</p>
                   </div>
                 </label>
                 <label
@@ -1162,9 +1160,36 @@
                     <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
                       >账号活跃趋势</span
                     >
-                    <p class="text-xs text-gray-500 dark:text-gray-400">显示近7天的活跃账号数量</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">显示活跃账号数量趋势</p>
                   </div>
                 </label>
+                <!-- 使用趋势时间范围选择器 -->
+                <div
+                  v-if="
+                    oemSettings.publicStatsShowTokenTrends ||
+                    oemSettings.publicStatsShowApiKeysTrends ||
+                    oemSettings.publicStatsShowAccountTrends
+                  "
+                  class="mt-3 pl-7"
+                >
+                  <div class="mb-1.5 text-xs text-gray-500 dark:text-gray-400">趋势时间范围</div>
+                  <div class="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700/50">
+                    <button
+                      v-for="option in trendsPeriodOptions"
+                      :key="option.value"
+                      class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
+                      :class="
+                        oemSettings.publicStatsTrendsPeriod === option.value
+                          ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
+                          : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+                      "
+                      type="button"
+                      @click="oemSettings.publicStatsTrendsPeriod = option.value"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                </div>
                 <label
                   class="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:hover:bg-gray-700"
                 >
@@ -1810,6 +1835,14 @@ const modelDistributionPeriodOptions = [
   { value: '7d', label: '7天' },
   { value: '30d', label: '30天' },
   { value: 'all', label: '全部' }
+]
+
+// 使用趋势时间范围选项（不支持'all'，数据量太大）
+const trendsPeriodOptions = [
+  { value: 'today', label: '今天' },
+  { value: '24h', label: '24小时' },
+  { value: '7d', label: '7天' },
+  { value: '30d', label: '30天' }
 ]
 
 // 组件refs
@@ -2665,6 +2698,7 @@ const saveOemSettings = async () => {
       publicStatsShowTokenTrends: oemSettings.value.publicStatsShowTokenTrends,
       publicStatsShowApiKeysTrends: oemSettings.value.publicStatsShowApiKeysTrends,
       publicStatsShowAccountTrends: oemSettings.value.publicStatsShowAccountTrends,
+      publicStatsTrendsPeriod: oemSettings.value.publicStatsTrendsPeriod || '7d',
       publicStatsShowSessionWindow: oemSettings.value.publicStatsShowSessionWindow
     }
     const result = await settingsStore.saveOemSettings(settings)

@@ -15,6 +15,7 @@ export const useSettingsStore = defineStore('settings', () => {
     publicStatsShowTokenTrends: false,
     publicStatsShowApiKeysTrends: false,
     publicStatsShowAccountTrends: false,
+    publicStatsTrendsPeriod: '7d', // 使用趋势时间范围: today, 24h, 7d, 30d
     publicStatsShowSessionWindow: false, // 是否显示账户会话窗口（负载情况）
     updatedAt: null
   })

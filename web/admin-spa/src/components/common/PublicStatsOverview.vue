@@ -87,7 +87,12 @@
 
     <!-- 趋势图表（三合一双Y轴折线图） -->
     <div v-if="hasAnyTrendData" class="chart-section">
-      <div class="section-title-left">使用趋势（近7天）</div>
+      <div class="section-title-left">
+        使用趋势
+        <span class="period-label">{{
+          formatTrendsPeriodLabel(authStore.publicStats.trendsPeriod)
+        }}</span>
+      </div>
       <div class="chart-container">
         <Line :data="chartData" :options="chartOptions" />
       </div>
@@ -126,7 +131,6 @@
       <div class="section-title-left">
         <i class="fas fa-window-restore mr-2 text-indigo-500"></i>
         会话窗口
-        <span class="period-label">账户负载</span>
       </div>
       <div class="session-window-list">
         <div
@@ -144,21 +148,21 @@
               </span>
             </div>
             <div class="account-meta">
-              <span class="platform-tag" :class="getPlatformClass(account.platform)">
-                {{ getPlatformLabel(account.platform, account.accountType) }}
-              </span>
               <span class="status-indicator" :class="getStatusClass(account.status)">
                 {{ getStatusLabel(account.status) }}
               </span>
             </div>
           </div>
 
-          <!-- Claude OAuth 账户：显示 Claude Usage -->
-          <div v-if="account.accountType === 'oauth' && account.claudeUsage" class="claude-usage">
+          <!-- Claude 额度：显示 5h Opus, 7d Opus, 5h Sonnet -->
+          <div
+            v-if="account.claudeUsage && hasAnyClaudeUsage(account.claudeUsage)"
+            class="claude-usage"
+          >
             <!-- 5小时 Opus -->
             <div v-if="account.claudeUsage.fiveHourOpus" class="usage-item">
               <div class="usage-label">
-                <span class="usage-period">5h</span>
+                <span class="usage-period">5h Opus</span>
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
@@ -174,7 +178,7 @@
             <!-- 7天 Opus -->
             <div v-if="account.claudeUsage.sevenDayOpus" class="usage-item">
               <div class="usage-label">
-                <span class="usage-period">7d</span>
+                <span class="usage-period">7d Opus</span>
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
@@ -187,10 +191,10 @@
                 >{{ getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}%</span
               >
             </div>
-            <!-- Sonnet -->
+            <!-- 5小时 Sonnet -->
             <div v-if="account.claudeUsage.fiveHourSonnet" class="usage-item">
               <div class="usage-label">
-                <span class="usage-period">sonnet</span>
+                <span class="usage-period">5h Sonnet</span>
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
@@ -205,13 +209,9 @@
             </div>
           </div>
 
-          <!-- Setup Token 账户：显示会话窗口进度 -->
+          <!-- 会话窗口进度：显示已使用百分比 -->
           <div
-            v-else-if="
-              account.accountType === 'setup-token' &&
-              account.sessionWindow &&
-              account.sessionWindow.hasActiveWindow
-            "
+            v-else-if="account.sessionWindow && account.sessionWindow.hasActiveWindow"
             class="session-progress"
           >
             <div class="progress-row">
@@ -219,10 +219,12 @@
                 <div
                   class="progress-bar"
                   :class="getSessionProgressClass(account.sessionWindow.sessionWindowStatus)"
-                  :style="{ width: account.sessionWindow.progress + '%' }"
+                  :style="{ width: getUsedPercent(account.sessionWindow.progress) + '%' }"
                 ></div>
               </div>
-              <span class="progress-value">{{ account.sessionWindow.progress }}%</span>
+              <span class="progress-value"
+                >{{ getUsedPercent(account.sessionWindow.progress) }}%</span
+              >
             </div>
             <div v-if="account.sessionWindow.remainingTime > 0" class="remaining-time">
               剩余 {{ formatRemainingTime(account.sessionWindow.remainingTime) }}
@@ -633,7 +635,7 @@ function formatTokensShort(tokens) {
   return tokens.toString()
 }
 
-// 格式化时间范围标签
+// 格式化时间范围标签（模型分布）
 function formatPeriodLabel(period) {
   const labels = {
     today: '今天',
@@ -643,6 +645,17 @@ function formatPeriodLabel(period) {
     all: '全部'
   }
   return labels[period] || labels['today']
+}
+
+// 格式化趋势时间范围标签
+function formatTrendsPeriodLabel(period) {
+  const labels = {
+    today: '今天',
+    '24h': '近24小时',
+    '7d': '近7天',
+    '30d': '近30天'
+  }
+  return labels[period] || labels['7d']
 }
 
 // 获取平台图标
@@ -729,6 +742,12 @@ function getStatusLabel(status) {
   return labels[status] || '正常'
 }
 
+// 检查是否有任何 Claude Usage 数据
+function hasAnyClaudeUsage(claudeUsage) {
+  if (!claudeUsage) return false
+  return !!(claudeUsage.fiveHourOpus || claudeUsage.sevenDayOpus || claudeUsage.fiveHourSonnet)
+}
+
 // 获取 Claude Usage 百分比
 function getClaudeUsagePercent(usage) {
   if (!usage || typeof usage.percentUsed !== 'number') return 0
@@ -760,6 +779,12 @@ function formatRemainingTime(minutes) {
     return `${hours}小时${mins > 0 ? mins + '分钟' : ''}`
   }
   return `${mins}分钟`
+}
+
+// 计算已使用百分比（从剩余百分比转换）
+function getUsedPercent(remainingPercent) {
+  if (typeof remainingPercent !== 'number') return 0
+  return Math.max(0, Math.min(100, 100 - remainingPercent))
 }
 
 // 获取 Console 账户额度百分比

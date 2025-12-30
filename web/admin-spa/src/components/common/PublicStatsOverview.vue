@@ -690,8 +690,17 @@ function formatModelName(model) {
 }
 
 // 格式化日期（短格式）
+// 支持两种格式：
+// - 日级别：YYYY-MM-DD -> MM/DD
+// - 小时级别：YYYY-MM-DD:HH -> HH:00
 function formatDateShort(dateStr) {
   if (!dateStr) return ''
+  // 检查是否为小时格式（YYYY-MM-DD:HH）
+  if (dateStr.includes(':')) {
+    const hour = dateStr.split(':')[1]
+    return `${hour}:00`
+  }
+  // 日期格式（YYYY-MM-DD）
   const parts = dateStr.split('-')
   if (parts.length === 3) {
     return `${parts[1]}/${parts[2]}`

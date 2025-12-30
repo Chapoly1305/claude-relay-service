@@ -774,125 +774,233 @@ async function getPublicTrendData(settings, period = '7d') {
   try {
     const client = redis.getClientSafe()
 
-    // 根据period确定天数
-    // 注意：数据按天聚合存储，'24h'需要包含今天+昨天以确保覆盖完整24小时
-    // 这样无论用户在哪个时区，都能看到至少24小时的数据
-    let days
-    switch (period) {
-      case 'today':
-        days = 1 // 仅今天（服务器时区）
-        break
-      case '24h':
-        days = 2 // 今天+昨天，确保覆盖完整24小时（跨时区场景）
-        break
-      case '7d':
-        days = 7
-        break
-      case '30d':
-        days = 30
-        break
-      default:
-        days = 7
-    }
-
-    // 生成日期列表
-    const dates = []
-    for (let i = days - 1; i >= 0; i--) {
-      const date = new Date()
-      date.setDate(date.getDate() - i)
-      dates.push(redis.getDateStringInTimezone(date))
-    }
-
-    // Token使用趋势
-    if (settings.publicStatsShowTokenTrends) {
-      const tokenTrends = []
-      for (const dateStr of dates) {
-        const pattern = `usage:model:daily:*:${dateStr}`
-        const keys = await client.keys(pattern)
-
-        let dayTokens = 0
-        let dayRequests = 0
-        for (const key of keys) {
-          const data = await client.hgetall(key)
-          if (data) {
-            dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
-            dayRequests += parseInt(data.requests) || 0
-          }
-        }
-
-        tokenTrends.push({
-          date: dateStr,
-          tokens: dayTokens,
-          requests: dayRequests
-        })
+    // 24h 使用小时级别数据，其他使用天级别数据
+    if (period === '24h') {
+      // 获取过去24小时的数据（按小时）
+      const hours = []
+      const now = new Date()
+      for (let i = 23; i >= 0; i--) {
+        const hourDate = new Date(now.getTime() - i * 60 * 60 * 1000)
+        const dateStr = redis.getDateStringInTimezone(hourDate)
+        const hourStr = String(redis.getHourInTimezone(hourDate)).padStart(2, '0')
+        hours.push(`${dateStr}:${hourStr}`)
       }
-      result.tokenTrends = tokenTrends
-    }
 
-    // API Keys使用趋势（脱敏：只显示总数，不显示具体Key）
-    if (settings.publicStatsShowApiKeysTrends) {
-      const apiKeysTrends = []
-      for (const dateStr of dates) {
-        const pattern = `usage:apikey:daily:*:${dateStr}`
-        const keys = await client.keys(pattern)
+      // Token使用趋势（按小时）
+      if (settings.publicStatsShowTokenTrends) {
+        const tokenTrends = []
+        for (const hourKey of hours) {
+          const pattern = `usage:model:hourly:*:${hourKey}`
+          const keys = await client.keys(pattern)
 
-        let dayRequests = 0
-        let dayTokens = 0
-        let activeKeys = 0
-
-        for (const key of keys) {
-          const data = await client.hgetall(key)
-          if (data) {
-            const requests = parseInt(data.requests) || 0
-            if (requests > 0) {
-              activeKeys++
-              dayRequests += requests
-              dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+          let hourTokens = 0
+          let hourRequests = 0
+          for (const key of keys) {
+            const data = await client.hgetall(key)
+            if (data) {
+              hourTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              hourRequests += parseInt(data.requests) || 0
             }
           }
+
+          tokenTrends.push({
+            date: hourKey, // 格式：YYYY-MM-DD:HH
+            tokens: hourTokens,
+            requests: hourRequests
+          })
         }
-
-        apiKeysTrends.push({
-          date: dateStr,
-          activeKeys,
-          requests: dayRequests,
-          tokens: dayTokens
-        })
+        result.tokenTrends = tokenTrends
       }
-      result.apiKeysTrends = apiKeysTrends
-    }
 
-    // 账号使用趋势（脱敏：只显示总数，不显示具体账号）
-    if (settings.publicStatsShowAccountTrends) {
-      const accountTrends = []
-      for (const dateStr of dates) {
-        const pattern = `usage:account:daily:*:${dateStr}`
-        const keys = await client.keys(pattern)
+      // API Keys使用趋势（按小时）
+      if (settings.publicStatsShowApiKeysTrends) {
+        const apiKeysTrends = []
+        for (const hourKey of hours) {
+          const pattern = `usage:hourly:*:${hourKey}`
+          const keys = await client.keys(pattern)
 
-        let dayRequests = 0
-        let dayTokens = 0
-        let activeAccounts = 0
+          let hourRequests = 0
+          let hourTokens = 0
+          const activeKeySet = new Set()
 
-        for (const key of keys) {
-          const data = await client.hgetall(key)
-          if (data) {
-            const requests = parseInt(data.requests) || 0
-            if (requests > 0) {
-              activeAccounts++
-              dayRequests += requests
-              dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+          for (const key of keys) {
+            // 从 key 中提取 keyId: usage:hourly:{keyId}:{hourKey}
+            const match = key.match(/usage:hourly:([^:]+):\d{4}-\d{2}-\d{2}:\d{2}$/)
+            if (!match) continue
+
+            const data = await client.hgetall(key)
+            if (data) {
+              const requests = parseInt(data.requests) || 0
+              if (requests > 0) {
+                activeKeySet.add(match[1])
+                hourRequests += requests
+                hourTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              }
             }
           }
-        }
 
-        accountTrends.push({
-          date: dateStr,
-          activeAccounts,
-          requests: dayRequests,
-          tokens: dayTokens
-        })
+          apiKeysTrends.push({
+            date: hourKey,
+            activeKeys: activeKeySet.size,
+            requests: hourRequests,
+            tokens: hourTokens
+          })
+        }
+        result.apiKeysTrends = apiKeysTrends
       }
-      result.accountTrends = accountTrends
+
+      // 账号使用趋势（按小时）
+      if (settings.publicStatsShowAccountTrends) {
+        const accountTrends = []
+        for (const hourKey of hours) {
+          const pattern = `account_usage:hourly:*:${hourKey}`
+          const keys = await client.keys(pattern)
+
+          let hourRequests = 0
+          let hourTokens = 0
+          const activeAccountSet = new Set()
+
+          for (const key of keys) {
+            // 从 key 中提取 accountId: account_usage:hourly:{accountId}:{hourKey}
+            const match = key.match(/account_usage:hourly:([^:]+):\d{4}-\d{2}-\d{2}:\d{2}$/)
+            if (!match) continue
+
+            const data = await client.hgetall(key)
+            if (data) {
+              const requests = parseInt(data.requests) || 0
+              if (requests > 0) {
+                activeAccountSet.add(match[1])
+                hourRequests += requests
+                hourTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              }
+            }
+          }
+
+          accountTrends.push({
+            date: hourKey,
+            activeAccounts: activeAccountSet.size,
+            requests: hourRequests,
+            tokens: hourTokens
+          })
+        }
+        result.accountTrends = accountTrends
+      }
+    } else {
+      // today, 7d, 30d 使用天级别数据
+      let days
+      switch (period) {
+        case 'today':
+          days = 1 // 仅今天（服务器时区）
+          break
+        case '7d':
+          days = 7
+          break
+        case '30d':
+          days = 30
+          break
+        default:
+          days = 7
+      }
+
+      // 生成日期列表
+      const dates = []
+      for (let i = days - 1; i >= 0; i--) {
+        const date = new Date()
+        date.setDate(date.getDate() - i)
+        dates.push(redis.getDateStringInTimezone(date))
+      }
+
+      // Token使用趋势
+      if (settings.publicStatsShowTokenTrends) {
+        const tokenTrends = []
+        for (const dateStr of dates) {
+          const pattern = `usage:model:daily:*:${dateStr}`
+          const keys = await client.keys(pattern)
+
+          let dayTokens = 0
+          let dayRequests = 0
+          for (const key of keys) {
+            const data = await client.hgetall(key)
+            if (data) {
+              dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              dayRequests += parseInt(data.requests) || 0
+            }
+          }
+
+          tokenTrends.push({
+            date: dateStr,
+            tokens: dayTokens,
+            requests: dayRequests
+          })
+        }
+        result.tokenTrends = tokenTrends
+      }
+
+      // API Keys使用趋势（脱敏：只显示总数，不显示具体Key）
+      if (settings.publicStatsShowApiKeysTrends) {
+        const apiKeysTrends = []
+        for (const dateStr of dates) {
+          const pattern = `usage:apikey:daily:*:${dateStr}`
+          const keys = await client.keys(pattern)
+
+          let dayRequests = 0
+          let dayTokens = 0
+          let activeKeys = 0
+
+          for (const key of keys) {
+            const data = await client.hgetall(key)
+            if (data) {
+              const requests = parseInt(data.requests) || 0
+              if (requests > 0) {
+                activeKeys++
+                dayRequests += requests
+                dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              }
+            }
+          }
+
+          apiKeysTrends.push({
+            date: dateStr,
+            activeKeys,
+            requests: dayRequests,
+            tokens: dayTokens
+          })
+        }
+        result.apiKeysTrends = apiKeysTrends
+      }
+
+      // 账号使用趋势（脱敏：只显示总数，不显示具体账号）
+      if (settings.publicStatsShowAccountTrends) {
+        const accountTrends = []
+        for (const dateStr of dates) {
+          const pattern = `usage:account:daily:*:${dateStr}`
+          const keys = await client.keys(pattern)
+
+          let dayRequests = 0
+          let dayTokens = 0
+          let activeAccounts = 0
+
+          for (const key of keys) {
+            const data = await client.hgetall(key)
+            if (data) {
+              const requests = parseInt(data.requests) || 0
+              if (requests > 0) {
+                activeAccounts++
+                dayRequests += requests
+                dayTokens += (parseInt(data.inputTokens) || 0) + (parseInt(data.outputTokens) || 0)
+              }
+            }
+          }
+
+          accountTrends.push({
+            date: dateStr,
+            activeAccounts,
+            requests: dayRequests,
+            tokens: dayTokens
+          })
+        }
+        result.accountTrends = accountTrends
+      }
     }
   } catch (error) {
     logger.warn('⚠️ Failed to get public trend data:', error.message)

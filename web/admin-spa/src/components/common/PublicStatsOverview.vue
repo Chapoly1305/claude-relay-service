@@ -700,26 +700,6 @@ function formatDateShort(dateStr) {
 
 // ========== 会话窗口相关函数 ==========
 
-// 获取平台样式类
-function getPlatformClass(platform) {
-  const classes = {
-    claude: 'platform-claude',
-    'claude-console': 'platform-console'
-  }
-  return classes[platform] || 'platform-default'
-}
-
-// 获取平台标签
-function getPlatformLabel(platform, accountType) {
-  if (platform === 'claude') {
-    return accountType === 'oauth' ? 'OAuth' : 'Setup Token'
-  }
-  if (platform === 'claude-console') {
-    return 'Console'
-  }
-  return platform
-}
-
 // 获取状态样式类
 function getStatusClass(status) {
   const classes = {

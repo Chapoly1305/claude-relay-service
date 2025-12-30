@@ -1075,37 +1075,184 @@
             <!-- 数据显示选项 -->
             <div
               v-if="oemSettings.publicStatsEnabled"
-              class="space-y-4 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-600 dark:bg-gray-700/50"
+              class="space-y-5 rounded-lg border border-gray-200 bg-gray-50 p-5 dark:border-gray-600 dark:bg-gray-700/50"
             >
-              <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                <i class="fas fa-eye mr-2 text-gray-400"></i>
-                选择要公开显示的数据：
-              </p>
-              <div class="grid gap-3 sm:grid-cols-2">
+              <div class="flex items-center gap-2">
+                <i class="fas fa-eye text-gray-400"></i>
+                <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  选择要公开显示的数据
+                </span>
+              </div>
+
+              <!-- 选项网格：统一卡片样式 -->
+              <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <!-- 模型使用分布 -->
-                <div
-                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
+                <label
+                  class="group flex cursor-pointer items-start gap-3 rounded-xl border-2 bg-white p-4 transition-all hover:border-green-200 hover:shadow-sm dark:bg-gray-800 dark:hover:border-green-700"
+                  :class="
+                    oemSettings.publicStatsShowModelDistribution
+                      ? 'border-green-500 shadow-sm dark:border-green-600'
+                      : 'border-gray-200 dark:border-gray-600'
+                  "
                 >
-                  <label class="flex cursor-pointer items-center gap-3">
-                    <input
-                      v-model="oemSettings.publicStatsShowModelDistribution"
-                      class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
-                      type="checkbox"
-                    />
-                    <div>
-                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >模型使用分布</span
-                      >
-                      <p class="text-xs text-gray-500 dark:text-gray-400">显示各模型的使用占比</p>
+                  <input
+                    v-model="oemSettings.publicStatsShowModelDistribution"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <i class="fas fa-chart-pie text-sm text-indigo-500"></i>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        模型使用分布
+                      </span>
                     </div>
-                  </label>
-                  <div v-if="oemSettings.publicStatsShowModelDistribution" class="mt-3 pl-7">
-                    <div class="mb-1.5 text-xs text-gray-500 dark:text-gray-400">时间范围</div>
-                    <div class="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700/50">
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      显示各模型的使用占比
+                    </p>
+                  </div>
+                </label>
+
+                <!-- Token 使用趋势 -->
+                <label
+                  class="group flex cursor-pointer items-start gap-3 rounded-xl border-2 bg-white p-4 transition-all hover:border-green-200 hover:shadow-sm dark:bg-gray-800 dark:hover:border-green-700"
+                  :class="
+                    oemSettings.publicStatsShowTokenTrends
+                      ? 'border-green-500 shadow-sm dark:border-green-600'
+                      : 'border-gray-200 dark:border-gray-600'
+                  "
+                >
+                  <input
+                    v-model="oemSettings.publicStatsShowTokenTrends"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <i class="fas fa-chart-line text-sm text-blue-500"></i>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Token 使用趋势
+                      </span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      显示 Token 使用量趋势
+                    </p>
+                  </div>
+                </label>
+
+                <!-- API Keys 活跃趋势 -->
+                <label
+                  class="group flex cursor-pointer items-start gap-3 rounded-xl border-2 bg-white p-4 transition-all hover:border-green-200 hover:shadow-sm dark:bg-gray-800 dark:hover:border-green-700"
+                  :class="
+                    oemSettings.publicStatsShowApiKeysTrends
+                      ? 'border-green-500 shadow-sm dark:border-green-600'
+                      : 'border-gray-200 dark:border-gray-600'
+                  "
+                >
+                  <input
+                    v-model="oemSettings.publicStatsShowApiKeysTrends"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <i class="fas fa-key text-sm text-amber-500"></i>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        API Keys 活跃趋势
+                      </span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      显示活跃 API Key 数量趋势
+                    </p>
+                  </div>
+                </label>
+
+                <!-- 账号活跃趋势 -->
+                <label
+                  class="group flex cursor-pointer items-start gap-3 rounded-xl border-2 bg-white p-4 transition-all hover:border-green-200 hover:shadow-sm dark:bg-gray-800 dark:hover:border-green-700"
+                  :class="
+                    oemSettings.publicStatsShowAccountTrends
+                      ? 'border-green-500 shadow-sm dark:border-green-600'
+                      : 'border-gray-200 dark:border-gray-600'
+                  "
+                >
+                  <input
+                    v-model="oemSettings.publicStatsShowAccountTrends"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <i class="fas fa-users text-sm text-purple-500"></i>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        账号活跃趋势
+                      </span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      显示活跃账号数量趋势
+                    </p>
+                  </div>
+                </label>
+
+                <!-- 会话窗口 -->
+                <label
+                  class="group flex cursor-pointer items-start gap-3 rounded-xl border-2 bg-white p-4 transition-all hover:border-green-200 hover:shadow-sm dark:bg-gray-800 dark:hover:border-green-700"
+                  :class="
+                    oemSettings.publicStatsShowSessionWindow
+                      ? 'border-green-500 shadow-sm dark:border-green-600'
+                      : 'border-gray-200 dark:border-gray-600'
+                  "
+                >
+                  <input
+                    v-model="oemSettings.publicStatsShowSessionWindow"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                      <i class="fas fa-window-restore text-sm text-teal-500"></i>
+                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        会话窗口
+                      </span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      显示账户会话窗口和负载
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <!-- 时间范围配置区域 -->
+              <div
+                v-if="
+                  oemSettings.publicStatsShowModelDistribution ||
+                  oemSettings.publicStatsShowTokenTrends ||
+                  oemSettings.publicStatsShowApiKeysTrends ||
+                  oemSettings.publicStatsShowAccountTrends
+                "
+                class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-600 dark:bg-gray-800"
+              >
+                <div class="flex items-center gap-2 pb-3">
+                  <i class="fas fa-clock text-sm text-gray-400"></i>
+                  <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    时间范围设置
+                  </span>
+                </div>
+
+                <div class="space-y-4">
+                  <!-- 模型分布时间范围 -->
+                  <div
+                    v-if="oemSettings.publicStatsShowModelDistribution"
+                    class="flex flex-wrap items-center gap-3"
+                  >
+                    <span class="min-w-[100px] text-sm text-gray-600 dark:text-gray-400">
+                      模型分布
+                    </span>
+                    <div class="inline-flex rounded-lg bg-gray-100 p-1 dark:bg-gray-700/50">
                       <button
                         v-for="option in modelDistributionPeriodOptions"
                         :key="option.value"
-                        class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
+                        class="rounded-md px-3 py-1.5 text-xs font-medium transition-all"
                         :class="
                           oemSettings.publicStatsModelDistributionPeriod === option.value
                             ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
@@ -1118,108 +1265,35 @@
                       </button>
                     </div>
                   </div>
-                </div>
-                <!-- Token 使用趋势 -->
-                <div
-                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
-                >
-                  <label class="flex cursor-pointer items-center gap-3">
-                    <input
-                      v-model="oemSettings.publicStatsShowTokenTrends"
-                      class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
-                      type="checkbox"
-                    />
-                    <div>
-                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >Token 使用趋势</span
+
+                  <!-- 趋势数据时间范围 -->
+                  <div
+                    v-if="
+                      oemSettings.publicStatsShowTokenTrends ||
+                      oemSettings.publicStatsShowApiKeysTrends ||
+                      oemSettings.publicStatsShowAccountTrends
+                    "
+                    class="flex flex-wrap items-center gap-3"
+                  >
+                    <span class="min-w-[100px] text-sm text-gray-600 dark:text-gray-400">
+                      趋势数据
+                    </span>
+                    <div class="inline-flex rounded-lg bg-gray-100 p-1 dark:bg-gray-700/50">
+                      <button
+                        v-for="option in trendsPeriodOptions"
+                        :key="option.value"
+                        class="rounded-md px-3 py-1.5 text-xs font-medium transition-all"
+                        :class="
+                          oemSettings.publicStatsTrendsPeriod === option.value
+                            ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
+                            : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+                        "
+                        type="button"
+                        @click="oemSettings.publicStatsTrendsPeriod = option.value"
                       >
-                      <p class="text-xs text-gray-500 dark:text-gray-400">显示Token使用量趋势</p>
+                        {{ option.label }}
+                      </button>
                     </div>
-                  </label>
-                </div>
-                <!-- API Keys 活跃趋势 -->
-                <div
-                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
-                >
-                  <label class="flex cursor-pointer items-center gap-3">
-                    <input
-                      v-model="oemSettings.publicStatsShowApiKeysTrends"
-                      class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
-                      type="checkbox"
-                    />
-                    <div>
-                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >API Keys 活跃趋势</span
-                      >
-                      <p class="text-xs text-gray-500 dark:text-gray-400">
-                        显示活跃API Key数量趋势
-                      </p>
-                    </div>
-                  </label>
-                </div>
-                <!-- 账号活跃趋势 -->
-                <div
-                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
-                >
-                  <label class="flex cursor-pointer items-center gap-3">
-                    <input
-                      v-model="oemSettings.publicStatsShowAccountTrends"
-                      class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
-                      type="checkbox"
-                    />
-                    <div>
-                      <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >账号活跃趋势</span
-                      >
-                      <p class="text-xs text-gray-500 dark:text-gray-400">显示活跃账号数量趋势</p>
-                    </div>
-                  </label>
-                </div>
-                <!-- 会话窗口 -->
-                <label
-                  class="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:hover:bg-gray-700"
-                >
-                  <input
-                    v-model="oemSettings.publicStatsShowSessionWindow"
-                    class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
-                    type="checkbox"
-                  />
-                  <div>
-                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                      >会话窗口</span
-                    >
-                    <p class="text-xs text-gray-500 dark:text-gray-400">
-                      显示账户的会话窗口和负载情况
-                    </p>
-                  </div>
-                </label>
-              </div>
-              <!-- 趋势时间范围选择器（独立显示） -->
-              <div
-                v-if="
-                  oemSettings.publicStatsShowTokenTrends ||
-                  oemSettings.publicStatsShowApiKeysTrends ||
-                  oemSettings.publicStatsShowAccountTrends
-                "
-                class="mt-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-600 dark:bg-gray-800"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="text-sm text-gray-500 dark:text-gray-400">趋势时间范围</span>
-                  <div class="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700/50">
-                    <button
-                      v-for="option in trendsPeriodOptions"
-                      :key="option.value"
-                      class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
-                      :class="
-                        oemSettings.publicStatsTrendsPeriod === option.value
-                          ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
-                          : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                      "
-                      type="button"
-                      @click="oemSettings.publicStatsTrendsPeriod = option.value"
-                    >
-                      {{ option.label }}
-                    </button>
                   </div>
                 </div>
               </div>

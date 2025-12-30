@@ -161,10 +161,10 @@
                 <span class="usage-period">5h</span>
                 <div
                   class="usage-progress-bar"
+                  :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
                   :style="{
                     width: getClaudeUsagePercent(account.claudeUsage.fiveHourOpus) + '%'
                   }"
-                  :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
                 ></div>
               </div>
               <span class="usage-value"
@@ -177,10 +177,10 @@
                 <span class="usage-period">7d</span>
                 <div
                   class="usage-progress-bar"
+                  :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
                   :style="{
                     width: getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) + '%'
                   }"
-                  :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
                 ></div>
               </div>
               <span class="usage-value"
@@ -193,10 +193,10 @@
                 <span class="usage-period">sonnet</span>
                 <div
                   class="usage-progress-bar"
+                  :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
                   :style="{
                     width: getClaudeUsagePercent(account.claudeUsage.fiveHourSonnet) + '%'
                   }"
-                  :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
                 ></div>
               </div>
               <span class="usage-value"
@@ -218,8 +218,8 @@
               <div class="progress-bar-wrapper">
                 <div
                   class="progress-bar"
-                  :style="{ width: account.sessionWindow.progress + '%' }"
                   :class="getSessionProgressClass(account.sessionWindow.sessionWindowStatus)"
+                  :style="{ width: account.sessionWindow.progress + '%' }"
                 ></div>
               </div>
               <span class="progress-value">{{ account.sessionWindow.progress }}%</span>
@@ -235,8 +235,8 @@
               <div class="quota-progress-wrapper">
                 <div
                   class="quota-progress-bar"
-                  :style="{ width: getQuotaPercent(account) + '%' }"
                   :class="getQuotaBarClass(getQuotaPercent(account))"
+                  :style="{ width: getQuotaPercent(account) + '%' }"
                 ></div>
               </div>
               <span class="quota-value">

@@ -1165,6 +1165,23 @@
                     <p class="text-xs text-gray-500 dark:text-gray-400">显示近7天的活跃账号数量</p>
                   </div>
                 </label>
+                <label
+                  class="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:hover:bg-gray-700"
+                >
+                  <input
+                    v-model="oemSettings.publicStatsShowSessionWindow"
+                    class="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500 dark:border-gray-600 dark:bg-gray-700"
+                    type="checkbox"
+                  />
+                  <div>
+                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                      >会话窗口</span
+                    >
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      显示账户的会话窗口和负载情况
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
 
@@ -2647,7 +2664,8 @@ const saveOemSettings = async () => {
         oemSettings.value.publicStatsModelDistributionPeriod || 'today',
       publicStatsShowTokenTrends: oemSettings.value.publicStatsShowTokenTrends,
       publicStatsShowApiKeysTrends: oemSettings.value.publicStatsShowApiKeysTrends,
-      publicStatsShowAccountTrends: oemSettings.value.publicStatsShowAccountTrends
+      publicStatsShowAccountTrends: oemSettings.value.publicStatsShowAccountTrends,
+      publicStatsShowSessionWindow: oemSettings.value.publicStatsShowSessionWindow
     }
     const result = await settingsStore.saveOemSettings(settings)
     if (result && result.success) {

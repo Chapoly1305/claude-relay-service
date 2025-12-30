@@ -114,6 +114,147 @@
       <p class="empty-text">暂无趋势数据</p>
       <p class="empty-hint">数据将在有请求后自动更新</p>
     </div>
+
+    <!-- 会话窗口（账户负载情况） -->
+    <div
+      v-if="
+        authStore.publicStats.showOptions?.sessionWindow &&
+        authStore.publicStats.sessionWindowAccounts?.length > 0
+      "
+      class="session-window-section"
+    >
+      <div class="section-title-left">
+        <i class="fas fa-window-restore mr-2 text-indigo-500"></i>
+        会话窗口
+        <span class="period-label">账户负载</span>
+      </div>
+      <div class="session-window-list">
+        <div
+          v-for="(account, index) in authStore.publicStats.sessionWindowAccounts"
+          :key="index"
+          class="session-window-item"
+        >
+          <!-- 账户头部信息 -->
+          <div class="account-header">
+            <div class="account-name-row">
+              <span class="account-name">{{ account.name }}</span>
+              <span v-if="account.isShared" class="shared-badge">
+                <i class="fas fa-share-alt text-[10px]"></i>
+                共享
+              </span>
+            </div>
+            <div class="account-meta">
+              <span class="platform-tag" :class="getPlatformClass(account.platform)">
+                {{ getPlatformLabel(account.platform, account.accountType) }}
+              </span>
+              <span class="status-indicator" :class="getStatusClass(account.status)">
+                {{ getStatusLabel(account.status) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Claude OAuth 账户：显示 Claude Usage -->
+          <div v-if="account.accountType === 'oauth' && account.claudeUsage" class="claude-usage">
+            <!-- 5小时 Opus -->
+            <div v-if="account.claudeUsage.fiveHourOpus" class="usage-item">
+              <div class="usage-label">
+                <span class="usage-period">5h</span>
+                <div
+                  class="usage-progress-bar"
+                  :style="{
+                    width: getClaudeUsagePercent(account.claudeUsage.fiveHourOpus) + '%'
+                  }"
+                  :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
+                ></div>
+              </div>
+              <span class="usage-value"
+                >{{ getClaudeUsagePercent(account.claudeUsage.fiveHourOpus) }}%</span
+              >
+            </div>
+            <!-- 7天 Opus -->
+            <div v-if="account.claudeUsage.sevenDayOpus" class="usage-item">
+              <div class="usage-label">
+                <span class="usage-period">7d</span>
+                <div
+                  class="usage-progress-bar"
+                  :style="{
+                    width: getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) + '%'
+                  }"
+                  :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
+                ></div>
+              </div>
+              <span class="usage-value"
+                >{{ getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}%</span
+              >
+            </div>
+            <!-- Sonnet -->
+            <div v-if="account.claudeUsage.fiveHourSonnet" class="usage-item">
+              <div class="usage-label">
+                <span class="usage-period">sonnet</span>
+                <div
+                  class="usage-progress-bar"
+                  :style="{
+                    width: getClaudeUsagePercent(account.claudeUsage.fiveHourSonnet) + '%'
+                  }"
+                  :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
+                ></div>
+              </div>
+              <span class="usage-value"
+                >{{ getClaudeUsagePercent(account.claudeUsage.fiveHourSonnet) }}%</span
+              >
+            </div>
+          </div>
+
+          <!-- Setup Token 账户：显示会话窗口进度 -->
+          <div
+            v-else-if="
+              account.accountType === 'setup-token' &&
+              account.sessionWindow &&
+              account.sessionWindow.hasActiveWindow
+            "
+            class="session-progress"
+          >
+            <div class="progress-row">
+              <div class="progress-bar-wrapper">
+                <div
+                  class="progress-bar"
+                  :style="{ width: account.sessionWindow.progress + '%' }"
+                  :class="getSessionProgressClass(account.sessionWindow.sessionWindowStatus)"
+                ></div>
+              </div>
+              <span class="progress-value">{{ account.sessionWindow.progress }}%</span>
+            </div>
+            <div v-if="account.sessionWindow.remainingTime > 0" class="remaining-time">
+              剩余 {{ formatRemainingTime(account.sessionWindow.remainingTime) }}
+            </div>
+          </div>
+
+          <!-- Console 账户：显示额度信息 -->
+          <div v-else-if="account.platform === 'claude-console'" class="console-quota">
+            <div v-if="account.dailyQuota > 0" class="quota-row">
+              <div class="quota-progress-wrapper">
+                <div
+                  class="quota-progress-bar"
+                  :style="{ width: getQuotaPercent(account) + '%' }"
+                  :class="getQuotaBarClass(getQuotaPercent(account))"
+                ></div>
+              </div>
+              <span class="quota-value">
+                ${{ formatCost(account.dailyUsed) }} / ${{ account.dailyQuota.toFixed(2) }}
+              </span>
+            </div>
+            <div v-if="account.maxConcurrentTasks > 0" class="concurrency-info">
+              并发: {{ account.currentConcurrency || 0 }} / {{ account.maxConcurrentTasks }}
+            </div>
+          </div>
+
+          <!-- 无数据 -->
+          <div v-else class="no-data">
+            <span class="text-xs text-gray-400">暂无数据</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 加载状态 -->
@@ -526,14 +667,11 @@ function getPlatformName(platform) {
   return names[platform] || platform
 }
 
-// 格式化模型名称
+// 格式化模型名称（显示完整名称，区分不同版本）
 function formatModelName(model) {
   if (!model) return 'Unknown'
-  // 简化长模型名称
-  const parts = model.split('-')
-  if (parts.length > 2) {
-    return parts.slice(0, 2).join('-')
-  }
+  // 不再简化模型名称，直接返回完整名称以区分不同版本
+  // 例如：claude-opus-4-5-20251101 vs claude-opus-4-20250514
   return model
 }
 
@@ -545,6 +683,102 @@ function formatDateShort(dateStr) {
     return `${parts[1]}/${parts[2]}`
   }
   return dateStr
+}
+
+// ========== 会话窗口相关函数 ==========
+
+// 获取平台样式类
+function getPlatformClass(platform) {
+  const classes = {
+    claude: 'platform-claude',
+    'claude-console': 'platform-console'
+  }
+  return classes[platform] || 'platform-default'
+}
+
+// 获取平台标签
+function getPlatformLabel(platform, accountType) {
+  if (platform === 'claude') {
+    return accountType === 'oauth' ? 'OAuth' : 'Setup Token'
+  }
+  if (platform === 'claude-console') {
+    return 'Console'
+  }
+  return platform
+}
+
+// 获取状态样式类
+function getStatusClass(status) {
+  const classes = {
+    active: 'status-active',
+    blocked: 'status-blocked',
+    unauthorized: 'status-error',
+    error: 'status-error'
+  }
+  return classes[status] || 'status-active'
+}
+
+// 获取状态标签
+function getStatusLabel(status) {
+  const labels = {
+    active: '正常',
+    blocked: '已阻止',
+    unauthorized: '未授权',
+    error: '错误'
+  }
+  return labels[status] || '正常'
+}
+
+// 获取 Claude Usage 百分比
+function getClaudeUsagePercent(usage) {
+  if (!usage || typeof usage.percentUsed !== 'number') return 0
+  return Math.round(usage.percentUsed)
+}
+
+// 获取使用进度条样式类
+function getUsageBarClass(usage) {
+  const percent = getClaudeUsagePercent(usage)
+  if (percent >= 80) return 'usage-bar-danger'
+  if (percent >= 50) return 'usage-bar-warning'
+  return 'usage-bar-normal'
+}
+
+// 获取会话窗口进度条样式类
+function getSessionProgressClass(status) {
+  if (status === 'rate_limited' || status === 'allowed_warning') {
+    return 'progress-bar-warning'
+  }
+  return 'progress-bar-normal'
+}
+
+// 格式化剩余时间
+function formatRemainingTime(minutes) {
+  if (!minutes || minutes <= 0) return ''
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  if (hours > 0) {
+    return `${hours}小时${mins > 0 ? mins + '分钟' : ''}`
+  }
+  return `${mins}分钟`
+}
+
+// 获取 Console 账户额度百分比
+function getQuotaPercent(account) {
+  if (!account.dailyQuota || account.dailyQuota <= 0) return 0
+  return Math.min(100, Math.round((account.dailyUsed / account.dailyQuota) * 100))
+}
+
+// 获取额度进度条样式类
+function getQuotaBarClass(percent) {
+  if (percent >= 90) return 'quota-bar-danger'
+  if (percent >= 70) return 'quota-bar-warning'
+  return 'quota-bar-normal'
+}
+
+// 格式化成本
+function formatCost(cost) {
+  if (!cost || cost === 0) return '0.00'
+  return Number(cost).toFixed(2)
 }
 </script>
 
@@ -746,5 +980,181 @@ function formatDateShort(dateStr) {
 
 .loading-spinner {
   @apply h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent;
+}
+
+/* ========== 会话窗口样式 ========== */
+.session-window-section {
+  @apply mt-4 rounded-lg bg-gray-50/50 p-4 dark:bg-gray-700/30 md:mt-6;
+}
+
+.session-window-list {
+  @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-3;
+}
+
+.session-window-item {
+  @apply rounded-lg border border-gray-200 bg-white p-3 shadow-sm transition-all hover:shadow-md dark:border-gray-600 dark:bg-gray-800;
+}
+
+.account-header {
+  @apply mb-2;
+}
+
+.account-name-row {
+  @apply flex items-center gap-2;
+}
+
+.account-name {
+  @apply text-sm font-medium text-gray-800 dark:text-gray-200;
+}
+
+.shared-badge {
+  @apply inline-flex items-center gap-1 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400;
+}
+
+.account-meta {
+  @apply mt-1 flex items-center gap-2;
+}
+
+.platform-tag {
+  @apply rounded px-1.5 py-0.5 text-[10px] font-medium;
+}
+
+.platform-claude {
+  @apply bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400;
+}
+
+.platform-console {
+  @apply bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400;
+}
+
+.platform-default {
+  @apply bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400;
+}
+
+.status-indicator {
+  @apply rounded px-1.5 py-0.5 text-[10px] font-medium;
+}
+
+.status-active {
+  @apply bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400;
+}
+
+.status-blocked {
+  @apply bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400;
+}
+
+.status-error {
+  @apply bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400;
+}
+
+/* Claude Usage 样式 */
+.claude-usage {
+  @apply space-y-1.5;
+}
+
+.usage-item {
+  @apply flex items-center gap-2;
+}
+
+.usage-label {
+  @apply relative flex flex-1 items-center gap-1.5;
+}
+
+.usage-period {
+  @apply min-w-[40px] text-[10px] font-medium text-gray-500 dark:text-gray-400;
+}
+
+.usage-progress-bar {
+  @apply h-1.5 flex-1 rounded-full transition-all;
+}
+
+.usage-bar-normal {
+  @apply bg-blue-500;
+}
+
+.usage-bar-warning {
+  @apply bg-yellow-500;
+}
+
+.usage-bar-danger {
+  @apply bg-red-500;
+}
+
+.usage-value {
+  @apply min-w-[32px] text-right text-[10px] font-semibold text-gray-700 dark:text-gray-300;
+}
+
+/* Setup Token 会话窗口进度样式 */
+.session-progress {
+  @apply space-y-1;
+}
+
+.progress-row {
+  @apply flex items-center gap-2;
+}
+
+.progress-bar-wrapper {
+  @apply h-2 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700;
+}
+
+.progress-bar {
+  @apply h-full rounded-full transition-all;
+}
+
+.progress-bar-normal {
+  @apply bg-indigo-500;
+}
+
+.progress-bar-warning {
+  @apply bg-yellow-500;
+}
+
+.progress-value {
+  @apply min-w-[32px] text-right text-xs font-medium text-gray-700 dark:text-gray-300;
+}
+
+.remaining-time {
+  @apply text-[10px] font-medium text-indigo-600 dark:text-indigo-400;
+}
+
+/* Console 账户额度样式 */
+.console-quota {
+  @apply space-y-1.5;
+}
+
+.quota-row {
+  @apply flex items-center gap-2;
+}
+
+.quota-progress-wrapper {
+  @apply h-2 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700;
+}
+
+.quota-progress-bar {
+  @apply h-full rounded-full transition-all;
+}
+
+.quota-bar-normal {
+  @apply bg-green-500;
+}
+
+.quota-bar-warning {
+  @apply bg-yellow-500;
+}
+
+.quota-bar-danger {
+  @apply bg-red-500;
+}
+
+.quota-value {
+  @apply text-[10px] font-medium text-gray-600 dark:text-gray-400;
+}
+
+.concurrency-info {
+  @apply text-[10px] text-gray-500 dark:text-gray-400;
+}
+
+.no-data {
+  @apply py-2 text-center;
 }
 </style>

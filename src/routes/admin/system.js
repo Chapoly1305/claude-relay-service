@@ -271,6 +271,7 @@ const defaultOemSettings = {
   publicStatsShowTokenTrends: false, // 显示Token使用趋势
   publicStatsShowApiKeysTrends: false, // 显示API Keys使用趋势
   publicStatsShowAccountTrends: false, // 显示账号使用趋势
+  publicStatsShowSessionWindow: false, // 显示账户会话窗口（负载情况）
   updatedAt: new Date().toISOString()
 }
 
@@ -323,7 +324,8 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsModelDistributionPeriod,
       publicStatsShowTokenTrends,
       publicStatsShowApiKeysTrends,
-      publicStatsShowAccountTrends
+      publicStatsShowAccountTrends,
+      publicStatsShowSessionWindow
     } = req.body
 
     // 验证输入
@@ -369,6 +371,7 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowTokenTrends: publicStatsShowTokenTrends === true, // 默认为false
       publicStatsShowApiKeysTrends: publicStatsShowApiKeysTrends === true, // 默认为false
       publicStatsShowAccountTrends: publicStatsShowAccountTrends === true, // 默认为false
+      publicStatsShowSessionWindow: publicStatsShowSessionWindow === true, // 默认为false，显示账户会话窗口
       updatedAt: new Date().toISOString()
     }
 
@@ -577,7 +580,8 @@ router.get('/public-stats', async (req, res) => {
         modelDistribution: settings.publicStatsShowModelDistribution !== false,
         tokenTrends: settings.publicStatsShowTokenTrends === true,
         apiKeysTrends: settings.publicStatsShowApiKeysTrends === true,
-        accountTrends: settings.publicStatsShowAccountTrends === true
+        accountTrends: settings.publicStatsShowAccountTrends === true,
+        sessionWindow: settings.publicStatsShowSessionWindow === true
       }
     }
 
@@ -604,6 +608,15 @@ router.get('/public-stats', async (req, res) => {
       if (settings.publicStatsShowAccountTrends && trendData.accountTrends) {
         publicStats.accountTrends = trendData.accountTrends
       }
+    }
+
+    // 获取会话窗口数据（脱敏后的账户负载信息）
+    if (settings.publicStatsShowSessionWindow === true) {
+      const sessionWindowData = await getPublicSessionWindowData(
+        claudeAccounts,
+        claudeConsoleAccounts
+      )
+      publicStats.sessionWindowAccounts = sessionWindowData
     }
 
     return res.json({
@@ -853,6 +866,86 @@ async function getPublicTrendData(settings) {
   }
 
   return result
+}
+
+// 获取公开会话窗口数据的辅助函数（脱敏后的账户负载信息）
+async function getPublicSessionWindowData(claudeAccounts, claudeConsoleAccounts) {
+  try {
+    const accounts = []
+
+    // 处理 Claude 官方账户
+    for (const account of claudeAccounts) {
+      // 只显示活跃且可调度的账户
+      if (!account.isActive || account.schedulable === false) {
+        continue
+      }
+
+      // 获取会话窗口信息
+      const sessionWindow = await claudeAccountService.getSessionWindowInfo(account.id)
+
+      // 判断账户类型（OAuth 或 Setup Token）
+      const isOAuth = !!(account.claudeAiOauth && account.claudeAiOauth.accessToken)
+
+      // 构建脱敏的账户信息
+      const accountInfo = {
+        name: account.name || '未命名账户',
+        platform: 'claude',
+        accountType: isOAuth ? 'oauth' : 'setup-token',
+        isShared: account.shared === 'true' || account.shared === true,
+        status: account.status || 'active',
+        // 会话窗口信息
+        sessionWindow: sessionWindow
+          ? {
+              hasActiveWindow: sessionWindow.hasActiveWindow,
+              progress: sessionWindow.progress || 0,
+              remainingTime: sessionWindow.remainingTime || 0,
+              sessionWindowStatus: sessionWindow.sessionWindowStatus || null
+            }
+          : null
+      }
+
+      // 如果是 OAuth 账户，添加 Claude Usage 信息（如果有）
+      if (isOAuth && account.claudeUsage) {
+        accountInfo.claudeUsage = {
+          fiveHourOpus: account.claudeUsage.fiveHourOpus || null,
+          sevenDayOpus: account.claudeUsage.sevenDayOpus || null,
+          fiveHourSonnet: account.claudeUsage.fiveHourSonnet || null
+        }
+      }
+
+      accounts.push(accountInfo)
+    }
+
+    // 处理 Claude Console 账户
+    for (const account of claudeConsoleAccounts) {
+      // 只显示活跃且可调度的账户
+      if (!account.isActive || account.schedulable === false) {
+        continue
+      }
+
+      const accountInfo = {
+        name: account.name || '未命名账户',
+        platform: 'claude-console',
+        accountType: 'console',
+        isShared: account.shared === 'true' || account.shared === true,
+        status: account.status || 'active',
+        // Console 账户的额度信息
+        dailyQuota: account.dailyQuota ? Number(account.dailyQuota) : null,
+        dailyUsed: account.usage?.daily?.cost || 0,
+        quotaResetTime: account.quotaResetTime || '00:00',
+        // 并发信息
+        maxConcurrentTasks: account.maxConcurrentTasks ? Number(account.maxConcurrentTasks) : null,
+        currentConcurrency: account.currentConcurrency || 0
+      }
+
+      accounts.push(accountInfo)
+    }
+
+    return accounts
+  } catch (error) {
+    logger.warn('⚠️ Failed to get public session window data:', error.message)
+    return []
+  }
 }
 
 module.exports = router

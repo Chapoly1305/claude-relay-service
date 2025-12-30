@@ -1082,6 +1082,7 @@
                 选择要公开显示的数据：
               </p>
               <div class="grid gap-3 sm:grid-cols-2">
+                <!-- 模型使用分布 -->
                 <div
                   class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
                 >
@@ -1118,9 +1119,9 @@
                     </div>
                   </div>
                 </div>
-                <!-- 使用趋势选项组 -->
+                <!-- Token 使用趋势 -->
                 <div
-                  class="space-y-2 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-600 dark:bg-gray-800"
+                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
                 >
                   <label class="flex cursor-pointer items-center gap-3">
                     <input
@@ -1135,6 +1136,11 @@
                       <p class="text-xs text-gray-500 dark:text-gray-400">显示Token使用量趋势</p>
                     </div>
                   </label>
+                </div>
+                <!-- API Keys 活跃趋势 -->
+                <div
+                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
+                >
                   <label class="flex cursor-pointer items-center gap-3">
                     <input
                       v-model="oemSettings.publicStatsShowApiKeysTrends"
@@ -1150,6 +1156,11 @@
                       </p>
                     </div>
                   </label>
+                </div>
+                <!-- 账号活跃趋势 -->
+                <div
+                  class="rounded-lg border border-gray-200 bg-white p-3 transition-colors dark:border-gray-600 dark:bg-gray-800"
+                >
                   <label class="flex cursor-pointer items-center gap-3">
                     <input
                       v-model="oemSettings.publicStatsShowAccountTrends"
@@ -1163,34 +1174,8 @@
                       <p class="text-xs text-gray-500 dark:text-gray-400">显示活跃账号数量趋势</p>
                     </div>
                   </label>
-                  <!-- 使用趋势时间范围选择器 -->
-                  <div
-                    v-if="
-                      oemSettings.publicStatsShowTokenTrends ||
-                      oemSettings.publicStatsShowApiKeysTrends ||
-                      oemSettings.publicStatsShowAccountTrends
-                    "
-                    class="mt-2 pl-7"
-                  >
-                    <div class="mb-1.5 text-xs text-gray-500 dark:text-gray-400">趋势时间范围</div>
-                    <div class="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700/50">
-                      <button
-                        v-for="option in trendsPeriodOptions"
-                        :key="option.value"
-                        class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
-                        :class="
-                          oemSettings.publicStatsTrendsPeriod === option.value
-                            ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
-                            : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-                        "
-                        type="button"
-                        @click="oemSettings.publicStatsTrendsPeriod = option.value"
-                      >
-                        {{ option.label }}
-                      </button>
-                    </div>
-                  </div>
                 </div>
+                <!-- 会话窗口 -->
                 <label
                   class="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:hover:bg-gray-700"
                 >
@@ -1208,6 +1193,35 @@
                     </p>
                   </div>
                 </label>
+              </div>
+              <!-- 趋势时间范围选择器（独立显示） -->
+              <div
+                v-if="
+                  oemSettings.publicStatsShowTokenTrends ||
+                  oemSettings.publicStatsShowApiKeysTrends ||
+                  oemSettings.publicStatsShowAccountTrends
+                "
+                class="mt-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-600 dark:bg-gray-800"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="text-sm text-gray-500 dark:text-gray-400">趋势时间范围</span>
+                  <div class="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-gray-700/50">
+                    <button
+                      v-for="option in trendsPeriodOptions"
+                      :key="option.value"
+                      class="rounded-md px-2.5 py-1 text-xs font-medium transition-all"
+                      :class="
+                        oemSettings.publicStatsTrendsPeriod === option.value
+                          ? 'bg-white text-green-600 shadow-sm dark:bg-gray-600 dark:text-green-400'
+                          : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+                      "
+                      type="button"
+                      @click="oemSettings.publicStatsTrendsPeriod = option.value"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 

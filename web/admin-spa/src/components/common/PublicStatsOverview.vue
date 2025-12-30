@@ -215,15 +215,16 @@
             class="session-progress"
           >
             <div class="progress-row">
+              <span class="progress-label">已用</span>
               <div class="progress-bar-wrapper">
                 <div
                   class="progress-bar"
                   :class="getSessionProgressClass(account.sessionWindow.sessionWindowStatus)"
-                  :style="{ width: getUsedPercent(account.sessionWindow.progress) + '%' }"
+                  :style="{ width: Math.round(account.sessionWindow.progress || 0) + '%' }"
                 ></div>
               </div>
               <span class="progress-value"
-                >{{ getUsedPercent(account.sessionWindow.progress) }}%</span
+                >{{ Math.round(account.sessionWindow.progress || 0) }}%</span
               >
             </div>
             <div v-if="account.sessionWindow.remainingTime > 0" class="remaining-time">
@@ -761,12 +762,6 @@ function formatRemainingTime(minutes) {
   return `${mins}分钟`
 }
 
-// 计算已使用百分比（从剩余百分比转换）
-function getUsedPercent(remainingPercent) {
-  if (typeof remainingPercent !== 'number') return 0
-  return Math.max(0, Math.min(100, 100 - remainingPercent))
-}
-
 // 获取 Console 账户额度百分比
 function getQuotaPercent(account) {
   if (!account.dailyQuota || account.dailyQuota <= 0) return 0
@@ -1096,6 +1091,10 @@ function formatCost(cost) {
 
 .progress-row {
   @apply flex items-center gap-2;
+}
+
+.progress-label {
+  @apply min-w-[28px] text-[10px] font-medium text-gray-500 dark:text-gray-400;
 }
 
 .progress-bar-wrapper {

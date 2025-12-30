@@ -705,18 +705,25 @@ async function getPublicModelStats(period = 'today') {
       return { stats: [], period }
     }
 
-    // 模型名标准化
+    // 模型名标准化（去掉日期后缀，合并相同基础模型）
     const normalizeModelName = (model) => {
       if (!model || model === 'unknown') {
         return model
       }
+      // 处理 Bedrock 格式
       if (model.includes('.anthropic.') || model.includes('.claude')) {
         let normalized = model.replace(/^[a-z0-9-]+\./, '')
         normalized = normalized.replace('anthropic.', '')
         normalized = normalized.replace(/-v\d+:\d+$/, '')
+        // 去掉日期后缀（如 -20251001）
+        normalized = normalized.replace(/-\d{8}$/, '')
         return normalized
       }
-      return model.replace(/-v\d+:\d+|:latest$/, '')
+      // 去掉版本号和 latest 后缀
+      let normalized = model.replace(/-v\d+:\d+|:latest$/, '')
+      // 去掉日期后缀（如 -20251001, -20250514）
+      normalized = normalized.replace(/-\d{8}$/, '')
+      return normalized
     }
 
     // 聚合模型数据
@@ -752,9 +759,23 @@ async function getPublicModelStats(period = 'today') {
       })
     }
 
-    // 按占比排序，取前5个
-    modelStats.sort((a, b) => b.percentage - a.percentage)
-    return { stats: modelStats.slice(0, 5), period }
+    // 过滤掉 0% 的项目，按占比排序
+    const filteredStats = modelStats.filter((s) => s.percentage > 0)
+    filteredStats.sort((a, b) => b.percentage - a.percentage)
+
+    // 取前5个，其余合并为 Others
+    if (filteredStats.length <= 5) {
+      return { stats: filteredStats, period }
+    }
+
+    const top5 = filteredStats.slice(0, 5)
+    const othersPercentage = filteredStats.slice(5).reduce((sum, s) => sum + s.percentage, 0)
+
+    if (othersPercentage > 0) {
+      top5.push({ model: 'Others', percentage: othersPercentage })
+    }
+
+    return { stats: top5, period }
   } catch (error) {
     logger.warn('⚠️ Failed to get public model stats:', error.message)
     return { stats: [], period }

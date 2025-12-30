@@ -161,8 +161,8 @@
           >
             <!-- 5小时 Opus -->
             <div v-if="account.claudeUsage.fiveHourOpus" class="usage-item">
-              <div class="usage-label">
-                <span class="usage-period">5h Opus</span>
+              <span class="usage-period">5h Opus</span>
+              <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
@@ -177,8 +177,8 @@
             </div>
             <!-- 7天 Opus -->
             <div v-if="account.claudeUsage.sevenDayOpus" class="usage-item">
-              <div class="usage-label">
-                <span class="usage-period">7d Opus</span>
+              <span class="usage-period">7d Opus</span>
+              <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
@@ -193,8 +193,8 @@
             </div>
             <!-- 5小时 Sonnet -->
             <div v-if="account.claudeUsage.fiveHourSonnet" class="usage-item">
-              <div class="usage-label">
-                <span class="usage-period">5h Sonnet</span>
+              <span class="usage-period">5h Sonnet</span>
+              <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
                   :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
@@ -1065,16 +1065,16 @@ function formatCost(cost) {
   @apply flex items-center gap-2;
 }
 
-.usage-label {
-  @apply relative flex flex-1 items-center gap-1.5;
+.usage-period {
+  @apply min-w-[55px] text-[10px] font-medium text-gray-500 dark:text-gray-400;
 }
 
-.usage-period {
-  @apply min-w-[40px] text-[10px] font-medium text-gray-500 dark:text-gray-400;
+.usage-bar-wrapper {
+  @apply h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700;
 }
 
 .usage-progress-bar {
-  @apply h-1.5 flex-1 rounded-full transition-all;
+  @apply h-full rounded-full transition-all;
 }
 
 .usage-bar-normal {

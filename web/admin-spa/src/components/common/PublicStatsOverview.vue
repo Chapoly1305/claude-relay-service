@@ -728,10 +728,10 @@ function hasAnyClaudeUsage(claudeUsage) {
   return !!(claudeUsage.fiveHourOpus || claudeUsage.sevenDayOpus || claudeUsage.fiveHourSonnet)
 }
 
-// 获取 Claude Usage 百分比
+// 获取 Claude Usage 百分比（已使用）
 function getClaudeUsagePercent(usage) {
-  if (!usage || typeof usage.percentUsed !== 'number') return 0
-  return Math.round(usage.percentUsed)
+  if (!usage || typeof usage.utilization !== 'number') return 0
+  return Math.round(usage.utilization)
 }
 
 // 获取使用进度条样式类

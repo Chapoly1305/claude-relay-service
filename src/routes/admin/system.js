@@ -937,12 +937,13 @@ async function getPublicSessionWindowData(claudeAccounts, claudeConsoleAccounts)
           : null
       }
 
-      // 如果是 OAuth 账户，添加 Claude Usage 信息（如果有）
-      if (isOAuth && account.claudeUsage) {
+      // 添加 Claude Usage 信息（如果有）
+      // 字段映射：fiveHour->5h Opus, sevenDayOpus->7d Opus, sevenDay->Sonnet
+      if (account.claudeUsage) {
         accountInfo.claudeUsage = {
-          fiveHourOpus: account.claudeUsage.fiveHourOpus || null,
+          fiveHourOpus: account.claudeUsage.fiveHour || null,
           sevenDayOpus: account.claudeUsage.sevenDayOpus || null,
-          fiveHourSonnet: account.claudeUsage.fiveHourSonnet || null
+          fiveHourSonnet: account.claudeUsage.sevenDay || null
         }
       }
 

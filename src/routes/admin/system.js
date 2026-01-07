@@ -1067,12 +1067,12 @@ async function getPublicSessionWindowData(claudeAccounts, claudeConsoleAccounts)
       }
 
       // 添加 Claude Usage 信息（如果有）
-      // 字段映射：fiveHour->5h Opus, sevenDayOpus->7d Opus, sevenDay->Sonnet
+      // 字段映射：fiveHour->5h, sevenDay->7d, sevenDaySonnet->sonnet
       if (account.claudeUsage) {
         accountInfo.claudeUsage = {
-          fiveHourOpus: account.claudeUsage.fiveHour || null,
-          sevenDayOpus: account.claudeUsage.sevenDayOpus || null,
-          fiveHourSonnet: account.claudeUsage.sevenDay || null
+          fiveHour: account.claudeUsage.fiveHour || null,
+          sevenDay: account.claudeUsage.sevenDay || null,
+          sevenDaySonnet: account.claudeUsage.sevenDaySonnet || null
         }
       }
 

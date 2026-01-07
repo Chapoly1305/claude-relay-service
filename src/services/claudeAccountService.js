@@ -1991,7 +1991,7 @@ class ClaudeAccountService {
           ? Math.max(0, Math.floor((new Date(sevenDayResetsAt).getTime() - now) / 1000))
           : null
       },
-      sevenDayOpus: {
+      sevenDaySonnet: {
         utilization: sevenDayOpusUtilization,
         resetsAt: sevenDayOpusResetsAt,
         remainingSeconds: sevenDayOpusResetsAt

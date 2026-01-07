@@ -154,57 +154,57 @@
             </div>
           </div>
 
-          <!-- Claude 额度：显示 5h Opus, 7d Opus, 5h Sonnet -->
+          <!-- Claude 额度：显示 5h, 7d, sonnet -->
           <div
             v-if="account.claudeUsage && hasAnyClaudeUsage(account.claudeUsage)"
             class="claude-usage"
           >
-            <!-- 5小时 Opus -->
-            <div v-if="account.claudeUsage.fiveHourOpus" class="usage-item">
-              <span class="usage-period">5h Opus</span>
+            <!-- 5小时窗口 -->
+            <div v-if="account.claudeUsage.fiveHour" class="usage-item">
+              <span class="usage-period">5h</span>
               <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
-                  :class="getUsageBarClass(account.claudeUsage.fiveHourOpus)"
+                  :class="getUsageBarClass(account.claudeUsage.fiveHour)"
                   :style="{
-                    width: getClaudeUsagePercent(account.claudeUsage.fiveHourOpus) + '%'
+                    width: getClaudeUsagePercent(account.claudeUsage.fiveHour) + '%'
                   }"
                 ></div>
               </div>
               <span class="usage-value"
-                >{{ getClaudeUsagePercent(account.claudeUsage.fiveHourOpus) }}%</span
+                >{{ getClaudeUsagePercent(account.claudeUsage.fiveHour) }}%</span
               >
             </div>
-            <!-- 7天 Opus -->
-            <div v-if="account.claudeUsage.sevenDayOpus" class="usage-item">
-              <span class="usage-period">7d Opus</span>
+            <!-- 7天窗口 -->
+            <div v-if="account.claudeUsage.sevenDay" class="usage-item">
+              <span class="usage-period">7d</span>
               <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
-                  :class="getUsageBarClass(account.claudeUsage.sevenDayOpus)"
+                  :class="getUsageBarClass(account.claudeUsage.sevenDay)"
                   :style="{
-                    width: getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) + '%'
+                    width: getClaudeUsagePercent(account.claudeUsage.sevenDay) + '%'
                   }"
                 ></div>
               </div>
               <span class="usage-value"
-                >{{ getClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}%</span
+                >{{ getClaudeUsagePercent(account.claudeUsage.sevenDay) }}%</span
               >
             </div>
-            <!-- 5小时 Sonnet -->
-            <div v-if="account.claudeUsage.fiveHourSonnet" class="usage-item">
-              <span class="usage-period">5h Sonnet</span>
+            <!-- Sonnet 窗口 -->
+            <div v-if="account.claudeUsage.sevenDaySonnet" class="usage-item">
+              <span class="usage-period">sonnet</span>
               <div class="usage-bar-wrapper">
                 <div
                   class="usage-progress-bar"
-                  :class="getUsageBarClass(account.claudeUsage.fiveHourSonnet)"
+                  :class="getUsageBarClass(account.claudeUsage.sevenDaySonnet)"
                   :style="{
-                    width: getClaudeUsagePercent(account.claudeUsage.fiveHourSonnet) + '%'
+                    width: getClaudeUsagePercent(account.claudeUsage.sevenDaySonnet) + '%'
                   }"
                 ></div>
               </div>
               <span class="usage-value"
-                >{{ getClaudeUsagePercent(account.claudeUsage.fiveHourSonnet) }}%</span
+                >{{ getClaudeUsagePercent(account.claudeUsage.sevenDaySonnet) }}%</span
               >
             </div>
           </div>
@@ -735,7 +735,7 @@ function getStatusLabel(status) {
 // 检查是否有任何 Claude Usage 数据
 function hasAnyClaudeUsage(claudeUsage) {
   if (!claudeUsage) return false
-  return !!(claudeUsage.fiveHourOpus || claudeUsage.sevenDayOpus || claudeUsage.fiveHourSonnet)
+  return !!(claudeUsage.fiveHour || claudeUsage.sevenDay || claudeUsage.sevenDaySonnet)
 }
 
 // 获取 Claude Usage 百分比（已使用）

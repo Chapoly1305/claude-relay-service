@@ -849,23 +849,23 @@
                                 <div
                                   :class="[
                                     'h-2 rounded-full transition-all duration-300',
-                                    getClaudeUsageBarClass(account.claudeUsage.sevenDayOpus)
+                                    getClaudeUsageBarClass(account.claudeUsage.sevenDaySonnet)
                                   ]"
                                   :style="{
-                                    width: getClaudeUsageWidth(account.claudeUsage.sevenDayOpus)
+                                    width: getClaudeUsageWidth(account.claudeUsage.sevenDaySonnet)
                                   }"
                                 />
                               </div>
                               <span
                                 class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                               >
-                                {{ formatClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}
+                                {{ formatClaudeUsagePercent(account.claudeUsage.sevenDaySonnet) }}
                               </span>
                             </div>
                           </div>
                         </div>
                         <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                          重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDayOpus) }}
+                          重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDaySonnet) }}
                         </div>
                       </div>
                     </div>
@@ -1511,23 +1511,23 @@
                           <div
                             :class="[
                               'h-2 rounded-full transition-all duration-300',
-                              getClaudeUsageBarClass(account.claudeUsage.sevenDayOpus)
+                              getClaudeUsageBarClass(account.claudeUsage.sevenDaySonnet)
                             ]"
                             :style="{
-                              width: getClaudeUsageWidth(account.claudeUsage.sevenDayOpus)
+                              width: getClaudeUsageWidth(account.claudeUsage.sevenDaySonnet)
                             }"
                           />
                         </div>
                         <span
                           class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                         >
-                          {{ formatClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}
+                          {{ formatClaudeUsagePercent(account.claudeUsage.sevenDaySonnet) }}
                         </span>
                       </div>
                     </div>
                   </div>
                   <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                    重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDayOpus) }}
+                    重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDaySonnet) }}
                   </div>
                 </div>
               </div>

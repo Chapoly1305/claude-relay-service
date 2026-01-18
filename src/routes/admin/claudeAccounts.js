@@ -84,10 +84,13 @@ router.post('/claude-accounts/exchange-code', authenticateAdmin, async (req, res
 
     // 统一处理授权码输入（可能是直接的code或完整的回调URL）
     let finalAuthCode
+    let redirectUri
     const inputValue = callbackUrl || authorizationCode
 
     try {
-      finalAuthCode = oauthHelper.parseCallbackUrl(inputValue)
+      const parsedInput = oauthHelper.parseCallbackUrl(inputValue)
+      finalAuthCode = parsedInput.authorizationCode
+      redirectUri = parsedInput.redirectUri
     } catch (parseError) {
       return res
         .status(400)
@@ -99,6 +102,7 @@ router.post('/claude-accounts/exchange-code', authenticateAdmin, async (req, res
       finalAuthCode,
       oauthSession.codeVerifier,
       oauthSession.state,
+      redirectUri,
       oauthSession.proxy // 传递代理配置
     )
 
@@ -206,10 +210,13 @@ router.post('/claude-accounts/exchange-setup-token-code', authenticateAdmin, asy
 
     // 统一处理授权码输入（可能是直接的code或完整的回调URL）
     let finalAuthCode
+    let redirectUri
     const inputValue = callbackUrl || authorizationCode
 
     try {
-      finalAuthCode = oauthHelper.parseCallbackUrl(inputValue)
+      const parsedInput = oauthHelper.parseCallbackUrl(inputValue)
+      finalAuthCode = parsedInput.authorizationCode
+      redirectUri = parsedInput.redirectUri
     } catch (parseError) {
       return res
         .status(400)
@@ -221,6 +228,7 @@ router.post('/claude-accounts/exchange-setup-token-code', authenticateAdmin, asy
       finalAuthCode,
       oauthSession.codeVerifier,
       oauthSession.state,
+      redirectUri,
       oauthSession.proxy // 传递代理配置
     )
 

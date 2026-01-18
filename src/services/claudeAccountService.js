@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require('uuid')
 const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
-const axios = require('axios')
+const { requestJsonStrict } = require('../utils/oauthHelper')
 const redis = require('../models/redis')
 const config = require('../../config/config')
 const logger = require('../utils/logger')
@@ -33,9 +33,17 @@ function isProAccount(info) {
   return info.accountType === 'claude_pro'
 }
 
+function buildOrderedHeaders(pairs) {
+  const headers = {}
+  for (const [key, value] of pairs) {
+    headers[key] = value
+  }
+  return headers
+}
+
 class ClaudeAccountService {
   constructor() {
-    this.claudeApiUrl = 'https://console.anthropic.com/v1/oauth/token'
+    this.claudeApiUrl = 'https://platform.claude.com/v1/oauth/token'
     this.claudeOauthClientId = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     let maxWarnings = parseInt(process.env.CLAUDE_5H_WARNING_MAX_NOTIFICATIONS || '', 10)
 
@@ -282,41 +290,37 @@ class ClaudeAccountService {
       // 创建代理agent
       const agent = this._createProxyAgent(accountData.proxy)
 
-      const axiosConfig = {
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/plain, */*',
-          'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-          'Accept-Language': 'en-US,en;q=0.9',
-          Referer: 'https://claude.ai/',
-          Origin: 'https://claude.ai'
-        },
+      const payload = JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: this.claudeOauthClientId
+      })
+
+      const headers = {
+        accept: 'application/json, text/plain, */*',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'content-type': 'application/json',
+        'user-agent': 'axios/1.8.4',
+        Host: 'platform.claude.com',
+        'Content-Length': Buffer.byteLength(payload).toString()
+      }
+
+      const response = await requestJsonStrict({
+        method: 'POST',
+        url: this.claudeApiUrl,
+        headers,
+        body: payload,
+        agent,
         timeout: 30000
-      }
+      })
 
-      if (agent) {
-        axiosConfig.httpAgent = agent
-        axiosConfig.httpsAgent = agent
-        axiosConfig.proxy = false
-      }
-
-      const response = await axios.post(
-        this.claudeApiUrl,
-        {
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          client_id: this.claudeOauthClientId
-        },
-        axiosConfig
-      )
-
-      if (response.status === 200) {
+      if (response.statusCode === 200) {
         // 记录完整的响应数据到专门的认证详细日志
         logger.authDetail('Token refresh response', response.data)
 
         // 记录简化版本到主日志
         logger.info('📊 Token refresh response (analyzing for subscription info):', {
-          status: response.status,
+          status: response.statusCode,
           hasData: !!response.data,
           dataKeys: response.data ? Object.keys(response.data) : []
         })
@@ -388,7 +392,7 @@ class ClaudeAccountService {
           expiresAt: accountData.expiresAt
         }
       } else {
-        throw new Error(`Token refresh failed with status: ${response.status}`)
+        throw new Error(`Token refresh failed with status: ${response.statusCode}`)
       }
     } catch (error) {
       // 记录刷新失败
@@ -1902,28 +1906,25 @@ class ClaudeAccountService {
 
       logger.debug(`📊 Fetching OAuth usage for account: ${accountData.name} (${accountId})`)
 
-      // 请求 OAuth usage 接口
-      const axiosConfig = {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'anthropic-beta': 'oauth-2025-04-20',
-          'User-Agent': 'claude-cli/2.0.53 (external, cli)',
-          'Accept-Language': 'en-US,en;q=0.9'
-        },
+      const headers = buildOrderedHeaders([
+        ['accept', 'application/json, text/plain, */*'],
+        ['Accept-Encoding', 'gzip, deflate, br'],
+        ['anthropic-beta', 'oauth-2025-04-20'],
+        ['authorization', `Bearer ${accessToken}`],
+        ['content-type', 'application/json'],
+        ['user-agent', 'claude-code/2.1.7'],
+        ['Host', 'api.anthropic.com']
+      ])
+
+      const response = await requestJsonStrict({
+        method: 'GET',
+        url: 'https://api.anthropic.com/api/oauth/usage',
+        headers,
+        agent,
         timeout: 15000
-      }
+      })
 
-      if (agent) {
-        axiosConfig.httpAgent = agent
-        axiosConfig.httpsAgent = agent
-        axiosConfig.proxy = false
-      }
-
-      const response = await axios.get('https://api.anthropic.com/api/oauth/usage', axiosConfig)
-
-      if (response.status === 200 && response.data) {
+      if (response.statusCode === 200 && response.data) {
         logger.debug('✅ Successfully fetched OAuth usage data:', {
           accountId,
           fiveHour: response.data.five_hour?.utilization,
@@ -1934,11 +1935,11 @@ class ClaudeAccountService {
         return response.data
       }
 
-      logger.warn(`⚠️ Failed to fetch OAuth usage for account ${accountId}: ${response.status}`)
+      logger.warn(`⚠️ Failed to fetch OAuth usage for account ${accountId}: ${response.statusCode}`)
       return null
     } catch (error) {
       // 403 错误通常表示使用的是 Setup Token 而非 OAuth
-      if (error.response?.status === 403) {
+      if (error.statusCode === 403) {
         logger.debug(
           `⚠️ OAuth usage API returned 403 for account ${accountId}. This account likely uses Setup Token instead of OAuth.`
         )
@@ -1948,7 +1949,7 @@ class ClaudeAccountService {
       // 其他错误正常记录
       logger.error(
         `❌ Failed to fetch OAuth usage for account ${accountId}:`,
-        error.response?.data || error.message
+        error.data || error.message
       )
       return null
     }
@@ -2088,27 +2089,25 @@ class ClaudeAccountService {
 
       logger.info(`📊 Fetching profile info for account: ${accountData.name} (${accountId})`)
 
-      // 请求 profile 接口
-      const axiosConfig = {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-          'Accept-Language': 'en-US,en;q=0.9'
-        },
+      const headers = buildOrderedHeaders([
+        ['accept', 'application/json, text/plain, */*'],
+        ['Accept-Encoding', 'gzip, deflate, br'],
+        ['authorization', `Bearer ${accessToken}`],
+        ['content-type', 'application/json'],
+        ['user-agent', 'axios/1.8.4'],
+        ['Connection', 'keep-alive'],
+        ['Host', 'api.anthropic.com']
+      ])
+
+      const response = await requestJsonStrict({
+        method: 'GET',
+        url: 'https://api.anthropic.com/api/oauth/profile',
+        headers,
+        agent,
         timeout: 15000
-      }
+      })
 
-      if (agent) {
-        axiosConfig.httpAgent = agent
-        axiosConfig.httpsAgent = agent
-        axiosConfig.proxy = false
-      }
-
-      const response = await axios.get('https://api.anthropic.com/api/oauth/profile', axiosConfig)
-
-      if (response.status === 200 && response.data) {
+      if (response.statusCode === 200 && response.data) {
         const profileData = response.data
 
         logger.info('✅ Successfully fetched profile data:', {
@@ -2164,12 +2163,12 @@ class ClaudeAccountService {
 
         return subscriptionInfo
       } else {
-        throw new Error(`Failed to fetch profile with status: ${response.status}`)
+        throw new Error(`Failed to fetch profile with status: ${response.statusCode}`)
       }
     } catch (error) {
-      if (error.response?.status === 401) {
+      if (error.statusCode === 401) {
         logger.warn(`⚠️ Profile API returned 401 for account ${accountId} - token may be invalid`)
-      } else if (error.response?.status === 403) {
+      } else if (error.statusCode === 403) {
         logger.warn(
           `⚠️ Profile API returned 403 for account ${accountId} - insufficient permissions`
         )

@@ -33,39 +33,21 @@ class ClaudeRelayService {
     this.toolNameSuffixTtlMs = 60 * 60 * 1000
   }
 
-  // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
-  _getBetaHeader(modelId, clientBetaHeader) {
-    const OAUTH_BETA = 'oauth-2025-04-20'
-    const CLAUDE_CODE_BETA = 'claude-code-20250219'
-    const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
-    const TOOL_STREAMING_BETA = 'fine-grained-tool-streaming-2025-05-14'
+  // 🔧 根据请求类型获取固定的 anthropic-beta header
+  // 规则：
+  // 1. 固定包含 oauth-2025-04-20 与 interleaved-thinking-2025-05-14
+  // 2. count_tokens 追加 token-counting-2024-11-01
+  _getBetaHeader(modelId, clientBetaHeader, requestOptions = {}) {
+    const REQUIRED_BETAS = ['oauth-2025-04-20', 'interleaved-thinking-2025-05-14']
+    const TOKEN_COUNTING_BETA = 'token-counting-2024-11-01'
 
-    const isHaikuModel = modelId && modelId.toLowerCase().includes('haiku')
-    const baseBetas = isHaikuModel
-      ? [OAUTH_BETA, INTERLEAVED_THINKING_BETA]
-      : [CLAUDE_CODE_BETA, OAUTH_BETA, INTERLEAVED_THINKING_BETA, TOOL_STREAMING_BETA]
-
-    const betaList = []
-    const seen = new Set()
-    const addBeta = (beta) => {
-      if (!beta || seen.has(beta)) {
-        return
-      }
-      seen.add(beta)
-      betaList.push(beta)
+    const isCountTokens = requestOptions?.customPath === '/v1/messages/count_tokens'
+    const betas = [...REQUIRED_BETAS]
+    if (isCountTokens && !betas.includes(TOKEN_COUNTING_BETA)) {
+      betas.push(TOKEN_COUNTING_BETA)
     }
 
-    baseBetas.forEach(addBeta)
-
-    if (clientBetaHeader) {
-      clientBetaHeader
-        .split(',')
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .forEach(addBeta)
-    }
-
-    return betaList.join(',')
+    return betas.join(',')
   }
 
   _buildStandardRateLimitMessage(resetTime) {
@@ -1291,9 +1273,6 @@ class ClaudeRelayService {
   ) {
     const { account, accountType, sessionHash, requestOptions = {}, isStream = false } = options
 
-    // 获取统一的 User-Agent
-    const unifiedUA = await this.captureAndGetUnifiedUserAgent(clientHeaders, account)
-
     // 获取过滤后的客户端 headers
     const filteredHeaders = this._filterClientHeaders(clientHeaders)
 
@@ -1303,7 +1282,7 @@ class ClaudeRelayService {
         : requestOptions.isRealClaudeCodeRequest === true
 
     // 如果不是真实的 Claude Code 请求，需要使用从账户获取的 Claude Code headers
-    let finalHeaders = { ...filteredHeaders }
+    const finalHeaders = { ...filteredHeaders }
     let requestPayload = body
 
     if (!isRealClaudeCode) {
@@ -1329,7 +1308,6 @@ class ClaudeRelayService {
     }
 
     requestPayload = extensionResult.body
-    finalHeaders = extensionResult.headers
 
     let toolNameMap = null
     if (!isRealClaudeCode) {
@@ -1342,31 +1320,41 @@ class ClaudeRelayService {
     const bodyString = JSON.stringify(requestPayload)
     const contentLength = Buffer.byteLength(bodyString, 'utf8')
 
-    // 构建最终请求头（包含认证、版本、User-Agent、Beta 等）
+    // 构建最终请求头（严格匹配上游请求格式）
+    // 注意：header 顺序必须与 claude-cli 原始请求完全一致
+    const modelId = requestPayload?.model || body?.model
+    const clientBetaHeader = clientHeaders?.['anthropic-beta']
+    const betaHeader = this._getBetaHeader(modelId, clientBetaHeader, requestOptions)
+
     const headers = {
-      host: 'api.anthropic.com',
-      connection: 'keep-alive',
-      'content-type': 'application/json',
-      'content-length': String(contentLength),
-      authorization: `Bearer ${accessToken}`,
+      accept: 'application/json',
+      'anthropic-beta': betaHeader,
+      'anthropic-dangerous-direct-browser-access': 'true',
       'anthropic-version': this.apiVersion,
-      ...finalHeaders
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json',
+      'user-agent': 'claude-cli/2.1.7 (external, cli)',
+      'x-app': 'cli',
+      'x-stainless-arch': 'x64',
+      'x-stainless-lang': 'js',
+      'x-stainless-os': 'Linux',
+      'x-stainless-package-version': '0.70.0',
+      'x-stainless-retry-count': '0',
+      'x-stainless-runtime': 'node',
+      'x-stainless-runtime-version': 'v24.3.0',
+      'x-stainless-timeout': '600',
+      Connection: 'keep-alive',
+      Host: 'api.anthropic.com',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Content-Length': String(contentLength)
     }
 
-    // 使用统一 User-Agent 或客户端提供的，最后使用默认值
-    const userAgent = unifiedUA || headers['user-agent'] || 'claude-cli/1.0.119 (external, cli)'
-    const acceptHeader = headers['accept'] || 'application/json'
-    delete headers['user-agent']
-    delete headers['accept']
-    headers['User-Agent'] = userAgent
-    headers['Accept'] = acceptHeader
+    logger.info(`🔗 指纹是这个: ${headers['user-agent']}`)
 
-    logger.info(`🔗 指纹是这个: ${headers['User-Agent']}`)
+    if (requestOptions?.customPath === '/v1/messages/count_tokens') {
+      delete headers['x-stainless-timeout']
+    }
 
-    // 根据模型和客户端传递的 anthropic-beta 动态设置 header
-    const modelId = requestPayload?.model || body?.model
-    const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
-    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader)
     return {
       requestPayload,
       bodyString,

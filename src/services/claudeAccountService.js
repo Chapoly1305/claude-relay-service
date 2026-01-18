@@ -95,9 +95,7 @@ class ClaudeAccountService {
       schedulable = true, // 是否可被调度
       subscriptionInfo = null, // 手动设置的订阅信息
       autoStopOnWarning = false, // 5小时使用量接近限制时自动停止调度
-      useUnifiedUserAgent = false, // 是否使用统一Claude Code版本的User-Agent
-      useUnifiedClientId = false, // 是否使用统一的客户端标识
-      unifiedClientId = '', // 统一的客户端标识
+      unifiedClientId = crypto.randomBytes(32).toString('hex'), // 统一的客户端标识（自动生成64位hex）
       expiresAt = null, // 账户订阅到期时间
       extInfo = null, // 额外扩展信息
       maxConcurrency = 0, // 账户级用户消息串行队列：0=使用全局配置，>0=强制启用串行
@@ -134,8 +132,6 @@ class ClaudeAccountService {
         errorMessage: '',
         schedulable: schedulable.toString(), // 是否可被调度
         autoStopOnWarning: autoStopOnWarning.toString(), // 5小时使用量接近限制时自动停止调度
-        useUnifiedUserAgent: useUnifiedUserAgent.toString(), // 是否使用统一Claude Code版本的User-Agent
-        useUnifiedClientId: useUnifiedClientId.toString(), // 是否使用统一的客户端标识
         unifiedClientId: unifiedClientId || '', // 统一的客户端标识
         // 优先使用手动设置的订阅信息，否则使用OAuth数据中的，否则默认为空
         subscriptionInfo: subscriptionInfo
@@ -176,7 +172,7 @@ class ClaudeAccountService {
         errorMessage: '',
         schedulable: schedulable.toString(), // 是否可被调度
         autoStopOnWarning: autoStopOnWarning.toString(), // 5小时使用量接近限制时自动停止调度
-        useUnifiedUserAgent: useUnifiedUserAgent.toString(), // 是否使用统一Claude Code版本的User-Agent
+        unifiedClientId: unifiedClientId || '', // 统一的客户端标识
         // 手动设置的订阅信息
         subscriptionInfo: subscriptionInfo ? JSON.stringify(subscriptionInfo) : '',
         // 账户订阅到期时间
@@ -231,8 +227,6 @@ class ClaudeAccountService {
           : null,
       scopes: claudeAiOauth ? claudeAiOauth.scopes : [],
       autoStopOnWarning,
-      useUnifiedUserAgent,
-      useUnifiedClientId,
       unifiedClientId,
       extInfo: normalizedExtInfo,
       interceptWarmup
@@ -581,10 +575,7 @@ class ClaudeAccountService {
             // 添加5小时自动停止状态
             fiveHourAutoStopped: account.fiveHourAutoStopped === 'true',
             fiveHourStoppedAt: account.fiveHourStoppedAt || null,
-            // 添加统一User-Agent设置
-            useUnifiedUserAgent: account.useUnifiedUserAgent === 'true', // 默认为false
-            // 添加统一客户端标识设置
-            useUnifiedClientId: account.useUnifiedClientId === 'true', // 默认为false
+            // 统一的客户端标识
             unifiedClientId: account.unifiedClientId || '', // 统一的客户端标识
             // 添加停止原因
             stoppedReason: account.stoppedReason || null,
@@ -681,8 +672,6 @@ class ClaudeAccountService {
         'schedulable',
         'subscriptionInfo',
         'autoStopOnWarning',
-        'useUnifiedUserAgent',
-        'useUnifiedClientId',
         'unifiedClientId',
         'subscriptionExpiresAt',
         'extInfo',

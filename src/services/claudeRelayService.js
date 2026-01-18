@@ -853,14 +853,7 @@ class ClaudeRelayService {
           )
         }
 
-        // 只有真实的 Claude Code 请求才更新 headers
-        if (
-          clientHeaders &&
-          Object.keys(clientHeaders).length > 0 &&
-          this.isRealClaudeCodeRequest(requestBody)
-        ) {
-          await claudeCodeHeadersService.storeAccountHeaders(accountId, clientHeaders)
-        }
+        // Headers 抓取已移除 - 现在所有账户永远使用平台默认 Headers
       }
 
       // 记录成功的API调用并打印详细的usage数据
@@ -1027,8 +1020,8 @@ class ClaudeRelayService {
       delete processedBody.top_p
     }
 
-    // 处理统一的客户端标识
-    if (account && account.useUnifiedClientId === 'true' && account.unifiedClientId) {
+    // 处理统一的客户端标识（平台强制启用）
+    if (account && account.unifiedClientId) {
       this._replaceClientId(processedBody, account.unifiedClientId)
     }
 
@@ -2185,7 +2178,6 @@ class ClaudeRelayService {
         // 🧹 内存优化：在闭包创建前提取需要的值，避免闭包捕获 body 和 requestOptions
         // body 和 requestOptions 只在闭包外使用，闭包内只引用基本类型
         const requestedModel = body?.model || 'unknown'
-        const { isRealClaudeCodeRequest } = requestOptions
 
         res.on('data', (chunk) => {
           try {
@@ -2510,10 +2502,7 @@ class ClaudeRelayService {
               )
             }
 
-            // 只有真实的 Claude Code 请求才更新 headers（流式请求）
-            if (clientHeaders && Object.keys(clientHeaders).length > 0 && isRealClaudeCodeRequest) {
-              await claudeCodeHeadersService.storeAccountHeaders(accountId, clientHeaders)
-            }
+            // Headers 抓取已移除 - 现在所有账户永远使用平台默认 Headers
           }
 
           // 🧹 清理 bodyStore
@@ -2736,103 +2725,6 @@ class ClaudeRelayService {
     } catch (error) {
       logger.error(`❌ Failed to clear 401 errors for account ${accountId}:`, error)
     }
-  }
-
-  // 🔧 动态捕获并获取统一的 User-Agent
-  async captureAndGetUnifiedUserAgent(clientHeaders, account) {
-    if (account.useUnifiedUserAgent !== 'true') {
-      return null
-    }
-
-    const CACHE_KEY = 'claude_code_user_agent:daily'
-    const TTL = 90000 // 25小时
-
-    // ⚠️ 重要：这里通过正则表达式判断是否为 Claude Code 客户端
-    // 如果未来 Claude Code 的 User-Agent 格式发生变化，需要更新这个正则表达式
-    // 当前已知格式：claude-cli/1.0.102 (external, cli)
-    const CLAUDE_CODE_UA_PATTERN = /^claude-cli\/[\d.]+\s+\(/i
-
-    const clientUA = clientHeaders?.['user-agent'] || clientHeaders?.['User-Agent']
-    let cachedUA = await redis.client.get(CACHE_KEY)
-
-    if (clientUA && CLAUDE_CODE_UA_PATTERN.test(clientUA)) {
-      if (!cachedUA) {
-        // 没有缓存，直接存储
-        await redis.client.setex(CACHE_KEY, TTL, clientUA)
-        logger.info(`📱 Captured unified Claude Code User-Agent: ${clientUA}`)
-        cachedUA = clientUA
-      } else {
-        // 有缓存，比较版本号，保存更新的版本
-        const shouldUpdate = this.compareClaudeCodeVersions(clientUA, cachedUA)
-        if (shouldUpdate) {
-          await redis.client.setex(CACHE_KEY, TTL, clientUA)
-          logger.info(`🔄 Updated to newer Claude Code User-Agent: ${clientUA} (was: ${cachedUA})`)
-          cachedUA = clientUA
-        } else {
-          // 当前版本不比缓存版本新，仅刷新TTL
-          await redis.client.expire(CACHE_KEY, TTL)
-        }
-      }
-    }
-
-    return cachedUA // 没有缓存返回 null
-  }
-
-  // 🔄 比较Claude Code版本号，判断是否需要更新
-  // 返回 true 表示 newUA 版本更新，需要更新缓存
-  compareClaudeCodeVersions(newUA, cachedUA) {
-    try {
-      // 提取版本号：claude-cli/1.0.102 (external, cli) -> 1.0.102
-      // 支持多段版本号格式，如 1.0.102、2.1.0.beta1 等
-      const newVersionMatch = newUA.match(/claude-cli\/([\d.]+(?:[a-zA-Z0-9-]*)?)/i)
-      const cachedVersionMatch = cachedUA.match(/claude-cli\/([\d.]+(?:[a-zA-Z0-9-]*)?)/i)
-
-      if (!newVersionMatch || !cachedVersionMatch) {
-        // 无法解析版本号，优先使用新的
-        logger.warn(`⚠️ Unable to parse Claude Code versions: new=${newUA}, cached=${cachedUA}`)
-        return true
-      }
-
-      const newVersion = newVersionMatch[1]
-      const cachedVersion = cachedVersionMatch[1]
-
-      // 比较版本号 (semantic version)
-      const compareResult = this.compareSemanticVersions(newVersion, cachedVersion)
-
-      logger.debug(`🔍 Version comparison: ${newVersion} vs ${cachedVersion} = ${compareResult}`)
-
-      return compareResult > 0 // 新版本更大则返回 true
-    } catch (error) {
-      logger.warn(`⚠️ Error comparing Claude Code versions, defaulting to update: ${error.message}`)
-      return true // 出错时优先使用新的
-    }
-  }
-
-  // 🔢 比较版本号
-  // 返回：1 表示 v1 > v2，-1 表示 v1 < v2，0 表示相等
-  compareSemanticVersions(version1, version2) {
-    // 将版本号字符串按"."分割成数字数组
-    const arr1 = version1.split('.')
-    const arr2 = version2.split('.')
-
-    // 获取两个版本号数组中的最大长度
-    const maxLength = Math.max(arr1.length, arr2.length)
-
-    // 循环遍历，逐段比较版本号
-    for (let i = 0; i < maxLength; i++) {
-      // 如果某个版本号的某一段不存在，则视为0
-      const num1 = parseInt(arr1[i] || 0, 10)
-      const num2 = parseInt(arr2[i] || 0, 10)
-
-      if (num1 > num2) {
-        return 1 // version1 大于 version2
-      }
-      if (num1 < num2) {
-        return -1 // version1 小于 version2
-      }
-    }
-
-    return 0 // 两个版本号相等
   }
 
   // 🧪 创建测试用的流转换器，将 Claude API SSE 格式转换为前端期望的格式

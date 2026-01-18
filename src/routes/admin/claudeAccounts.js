@@ -84,10 +84,13 @@ router.post('/claude-accounts/exchange-code', authenticateAdmin, async (req, res
 
     // 统一处理授权码输入（可能是直接的code或完整的回调URL）
     let finalAuthCode
+    let redirectUri
     const inputValue = callbackUrl || authorizationCode
 
     try {
-      finalAuthCode = oauthHelper.parseCallbackUrl(inputValue)
+      const parsedInput = oauthHelper.parseCallbackUrl(inputValue)
+      finalAuthCode = parsedInput.authorizationCode
+      redirectUri = parsedInput.redirectUri
     } catch (parseError) {
       return res
         .status(400)
@@ -99,6 +102,7 @@ router.post('/claude-accounts/exchange-code', authenticateAdmin, async (req, res
       finalAuthCode,
       oauthSession.codeVerifier,
       oauthSession.state,
+      redirectUri,
       oauthSession.proxy // 传递代理配置
     )
 
@@ -206,10 +210,13 @@ router.post('/claude-accounts/exchange-setup-token-code', authenticateAdmin, asy
 
     // 统一处理授权码输入（可能是直接的code或完整的回调URL）
     let finalAuthCode
+    let redirectUri
     const inputValue = callbackUrl || authorizationCode
 
     try {
-      finalAuthCode = oauthHelper.parseCallbackUrl(inputValue)
+      const parsedInput = oauthHelper.parseCallbackUrl(inputValue)
+      finalAuthCode = parsedInput.authorizationCode
+      redirectUri = parsedInput.redirectUri
     } catch (parseError) {
       return res
         .status(400)
@@ -221,6 +228,7 @@ router.post('/claude-accounts/exchange-setup-token-code', authenticateAdmin, asy
       finalAuthCode,
       oauthSession.codeVerifier,
       oauthSession.state,
+      redirectUri,
       oauthSession.proxy // 传递代理配置
     )
 
@@ -580,8 +588,6 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       groupId,
       groupIds,
       autoStopOnWarning,
-      useUnifiedUserAgent,
-      useUnifiedClientId,
       unifiedClientId,
       expiresAt,
       extInfo,
@@ -615,7 +621,7 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Priority must be a number between 1 and 100' })
     }
 
-    const newAccount = await claudeAccountService.createAccount({
+    const createOptions = {
       name,
       description,
       email,
@@ -627,14 +633,18 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       platform,
       priority: priority || 50, // 默认优先级为50
       autoStopOnWarning: autoStopOnWarning === true, // 默认为false
-      useUnifiedUserAgent: useUnifiedUserAgent === true, // 默认为false
-      useUnifiedClientId: useUnifiedClientId === true, // 默认为false
-      unifiedClientId: unifiedClientId || '', // 统一的客户端标识
       expiresAt: expiresAt || null, // 账户订阅到期时间
       extInfo: extInfo || null,
       maxConcurrency: maxConcurrency || 0, // 账户级串行队列：0=使用全局配置，>0=强制启用
       interceptWarmup: interceptWarmup === true // 拦截预热请求：默认为false
-    })
+    }
+
+    // 如果前端提供了 unifiedClientId，使用它；否则服务层自动生成
+    if (unifiedClientId) {
+      createOptions.unifiedClientId = unifiedClientId
+    }
+
+    const newAccount = await claudeAccountService.createAccount(createOptions)
 
     // 如果是分组类型，将账户添加到分组
     if (accountType === 'group') {

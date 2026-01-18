@@ -6,17 +6,26 @@
 const crypto = require('crypto')
 const ProxyHelper = require('./proxyHelper')
 const axios = require('axios')
+const https = require('https')
+const zlib = require('zlib')
 const logger = require('./logger')
 
 // OAuth 配置常量 - 从claude-code-login.js提取
 const OAUTH_CONFIG = {
+  PLATFORM_BASE_URL: 'https://platform.claude.com',
+  API_BASE_URL: 'https://api.anthropic.com',
   AUTHORIZE_URL: 'https://claude.ai/oauth/authorize',
-  TOKEN_URL: 'https://console.anthropic.com/v1/oauth/token',
+  TOKEN_URL: 'https://platform.claude.com/v1/oauth/token',
   CLIENT_ID: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   REDIRECT_URI: 'https://console.anthropic.com/oauth/code/callback',
   SCOPES: 'org:create_api_key user:profile user:inference',
   SCOPES_SETUP: 'user:inference' // Setup Token 只需要推理权限
 }
+
+const OAUTH_ACCEPT = 'application/json, text/plain, */*'
+const OAUTH_ACCEPT_ENCODING = 'gzip, deflate, br'
+const OAUTH_USER_AGENT = 'axios/1.8.4'
+const OAUTH_HELLO_USER_AGENT = 'claude-cli/2.1.7 (external, cli)'
 
 // Cookie自动授权配置常量
 const COOKIE_OAUTH_CONFIG = {
@@ -139,29 +148,277 @@ function createProxyAgent(proxyConfig) {
   return ProxyHelper.createProxyAgent(proxyConfig)
 }
 
+function buildHeaders(pairs) {
+  const headers = {}
+  for (const [key, value] of pairs) {
+    headers[key] = value
+  }
+  return headers
+}
+
+function decodeResponseBody(buffer, encoding) {
+  if (!encoding) {
+    return buffer
+  }
+
+  const normalized = encoding.split(',')[0].trim().toLowerCase()
+
+  if (normalized === 'gzip') {
+    return zlib.gunzipSync(buffer)
+  }
+
+  if (normalized === 'deflate') {
+    return zlib.inflateSync(buffer)
+  }
+
+  if (normalized === 'br') {
+    return zlib.brotliDecompressSync(buffer)
+  }
+
+  return buffer
+}
+
+async function requestJsonStrict({
+  method,
+  url,
+  headers,
+  body = null,
+  agent = null,
+  timeout = 30000
+}) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const options = {
+      protocol: urlObj.protocol,
+      hostname: urlObj.hostname,
+      port: urlObj.port || 443,
+      path: `${urlObj.pathname}${urlObj.search}`,
+      method,
+      headers
+    }
+
+    if (agent) {
+      options.agent = agent
+    }
+
+    const req = https.request(options, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        try {
+          const raw = Buffer.concat(chunks)
+          const decoded = decodeResponseBody(raw, res.headers['content-encoding'])
+          const text = decoded.length > 0 ? decoded.toString('utf8') : ''
+          let data = null
+
+          if (text) {
+            try {
+              data = JSON.parse(text)
+            } catch (parseError) {
+              data = text
+            }
+          }
+
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            const error = new Error(`HTTP ${res.statusCode}`)
+            error.statusCode = res.statusCode
+            error.statusText = res.statusMessage
+            error.headers = res.headers
+            error.data = data
+            return reject(error)
+          }
+
+          return resolve({ statusCode: res.statusCode, data, headers: res.headers })
+        } catch (error) {
+          return reject(error)
+        }
+      })
+    })
+
+    req.on('error', (error) => {
+      reject(error)
+    })
+
+    req.setTimeout(timeout, () => {
+      req.destroy(new Error('Request timed out'))
+    })
+
+    if (body) {
+      req.write(body)
+    }
+
+    req.end()
+  })
+}
+
+async function requestOauthHello(proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['user-agent', OAUTH_HELLO_USER_AGENT],
+    ['Host', 'platform.claude.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.PLATFORM_BASE_URL}/v1/oauth/hello`,
+    headers,
+    agent,
+    timeout: 30000
+  })
+}
+
+async function requestOauthProfile(accessToken, proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['authorization', `Bearer ${accessToken}`],
+    ['content-type', 'application/json'],
+    ['user-agent', OAUTH_USER_AGENT],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/oauth/profile`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
+async function requestApiHello(proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['cache-control', 'no-cache'],
+    ['user-agent', OAUTH_USER_AGENT],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/hello`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
+async function requestOauthRoles(accessToken, proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['authorization', `Bearer ${accessToken}`],
+    ['user-agent', OAUTH_USER_AGENT],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/oauth/claude_cli/roles`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
+async function requestMetricsEnabled(accessToken, proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['anthropic-beta', 'oauth-2025-04-20'],
+    ['authorization', `Bearer ${accessToken}`],
+    ['content-type', 'application/json'],
+    ['user-agent', 'claude-code/2.1.7'],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/claude_code/organizations/metrics_enabled`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
+async function requestClaudeCodeGrove(accessToken, proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['anthropic-beta', 'oauth-2025-04-20'],
+    ['authorization', `Bearer ${accessToken}`],
+    ['user-agent', OAUTH_HELLO_USER_AGENT],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/claude_code_grove`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
+async function requestAccountSettings(accessToken, proxyConfig = null) {
+  const agent = createProxyAgent(proxyConfig)
+  const headers = buildHeaders([
+    ['accept', OAUTH_ACCEPT],
+    ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+    ['anthropic-beta', 'oauth-2025-04-20'],
+    ['authorization', `Bearer ${accessToken}`],
+    ['user-agent', 'claude-code/2.1.7'],
+    ['Host', 'api.anthropic.com']
+  ])
+
+  return requestJsonStrict({
+    method: 'GET',
+    url: `${OAUTH_CONFIG.API_BASE_URL}/api/oauth/account/settings`,
+    headers,
+    agent,
+    timeout: 15000
+  })
+}
+
 /**
  * 使用授权码交换访问令牌
  * @param {string} authorizationCode - 授权码
  * @param {string} codeVerifier - PKCE code verifier
  * @param {string} state - state 参数
+ * @param {string|null} redirectUri - redirect_uri（可选）
  * @param {object|null} proxyConfig - 代理配置（可选）
  * @returns {Promise<object>} Claude格式的token响应
  */
-async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, proxyConfig = null) {
+async function exchangeCodeForTokens(
+  authorizationCode,
+  codeVerifier,
+  state,
+  redirectUri = null,
+  proxyConfig = null
+) {
   // 清理授权码，移除URL片段
   const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+  const finalRedirectUri = redirectUri || OAUTH_CONFIG.REDIRECT_URI
 
   const params = {
     grant_type: 'authorization_code',
-    client_id: OAUTH_CONFIG.CLIENT_ID,
     code: cleanedCode,
-    redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
+    redirect_uri: finalRedirectUri,
+    client_id: OAUTH_CONFIG.CLIENT_ID,
     code_verifier: codeVerifier,
     state
   }
 
-  // 创建代理agent
   const agent = createProxyAgent(proxyConfig)
+  let step = 'hello'
 
   try {
     if (agent) {
@@ -172,6 +429,21 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
       logger.debug('🌐 No proxy configured for OAuth token exchange')
     }
 
+    logger.debug('👋 Sending OAuth hello request', {
+      url: `${OAUTH_CONFIG.PLATFORM_BASE_URL}/v1/oauth/hello`,
+      hasProxy: !!proxyConfig,
+      proxyType: proxyConfig?.type || 'none'
+    })
+    await requestOauthHello(proxyConfig)
+
+    step = 'api_hello'
+    logger.debug('👋 Sending API hello request', {
+      url: `${OAUTH_CONFIG.API_BASE_URL}/api/hello`,
+      hasProxy: !!proxyConfig
+    })
+    await requestApiHello(proxyConfig)
+
+    step = 'token_exchange'
     logger.debug('🔄 Attempting OAuth token exchange', {
       url: OAUTH_CONFIG.TOKEN_URL,
       codeLength: cleanedCode.length,
@@ -180,38 +452,37 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
       proxyType: proxyConfig?.type || 'none'
     })
 
-    const axiosConfig = {
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-        Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
-      },
+    const payload = JSON.stringify(params)
+    const headers = buildHeaders([
+      ['accept', OAUTH_ACCEPT],
+      ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+      ['content-type', 'application/json'],
+      ['user-agent', OAUTH_USER_AGENT],
+      ['Host', 'platform.claude.com'],
+      ['Content-Length', Buffer.byteLength(payload).toString()]
+    ])
+
+    const response = await requestJsonStrict({
+      method: 'POST',
+      url: OAUTH_CONFIG.TOKEN_URL,
+      headers,
+      body: payload,
+      agent,
       timeout: 30000
-    }
-
-    if (agent) {
-      axiosConfig.httpAgent = agent
-      axiosConfig.httpsAgent = agent
-      axiosConfig.proxy = false
-    }
-
-    const response = await axios.post(OAUTH_CONFIG.TOKEN_URL, params, axiosConfig)
+    })
 
     // 记录完整的响应数据到专门的认证详细日志
     logger.authDetail('OAuth token exchange response', response.data)
 
     // 记录简化版本到主日志
     logger.info('📊 OAuth token exchange response (analyzing for subscription info):', {
-      status: response.status,
+      status: response.statusCode,
       hasData: !!response.data,
       dataKeys: response.data ? Object.keys(response.data) : []
     })
 
     logger.success('✅ OAuth token exchange successful', {
-      status: response.status,
+      status: response.statusCode,
       hasAccessToken: !!response.data?.access_token,
       hasRefreshToken: !!response.data?.refresh_token,
       scopes: response.data?.scope,
@@ -256,25 +527,56 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
       logger.info('🎯 Found subscription info in OAuth response:', result.subscriptionInfo)
     }
 
+    step = 'profile'
+    logger.debug('📊 Fetching OAuth profile info (post-login)')
+    const profileResponse = await requestOauthProfile(result.accessToken, proxyConfig)
+
+    step = 'roles'
+    logger.debug('📊 Fetching OAuth roles (post-login)')
+    const rolesResponse = await requestOauthRoles(result.accessToken, proxyConfig)
+
+    step = 'metrics_enabled'
+    logger.debug('📊 Fetching metrics enabled status (post-login)')
+    const metricsResponse = await requestMetricsEnabled(result.accessToken, proxyConfig)
+
+    step = 'claude_code_grove'
+    logger.debug('🌲 Fetching Claude Code grove status (post-login)')
+    const groveResponse = await requestClaudeCodeGrove(result.accessToken, proxyConfig)
+
+    step = 'account_settings'
+    logger.debug('⚙️ Fetching account settings (post-login)')
+    const settingsResponse = await requestAccountSettings(result.accessToken, proxyConfig)
+
+    logger.info('✅ OAuth post-login checks completed', {
+      hasProfile: !!profileResponse?.data,
+      hasRoles: !!rolesResponse?.data,
+      hasMetrics: !!metricsResponse?.data,
+      hasGrove: !!groveResponse?.data,
+      hasSettings: !!settingsResponse?.data
+    })
+
     return result
   } catch (error) {
-    // 处理axios错误响应
-    if (error.response) {
-      // 服务器返回了错误状态码
-      const { status } = error.response
-      const errorData = error.response.data
+    const stepLabel = step.replace('_', ' ')
 
-      logger.error('❌ OAuth token exchange failed with server error', {
-        status,
-        statusText: error.response.statusText,
-        headers: error.response.headers,
-        data: errorData,
-        codeLength: cleanedCode.length,
-        codePrefix: `${cleanedCode.substring(0, 10)}...`
-      })
+    if (error.statusCode) {
+      const errorData = error.data
+      const errorContext = {
+        step,
+        status: error.statusCode,
+        statusText: error.statusText,
+        headers: error.headers,
+        data: errorData
+      }
 
-      // 尝试从错误响应中提取有用信息
-      let errorMessage = `HTTP ${status}`
+      if (step === 'token_exchange') {
+        errorContext.codeLength = cleanedCode.length
+        errorContext.codePrefix = `${cleanedCode.substring(0, 10)}...`
+      }
+
+      logger.error(`❌ OAuth ${stepLabel} failed with server error`, errorContext)
+
+      let errorMessage = `HTTP ${error.statusCode}`
 
       if (errorData) {
         if (typeof errorData === 'string') {
@@ -289,30 +591,34 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
         }
       }
 
-      throw new Error(`Token exchange failed: ${errorMessage}`)
-    } else if (error.request) {
-      // 请求被发送但没有收到响应
-      logger.error('❌ OAuth token exchange failed with network error', {
+      throw new Error(`OAuth ${stepLabel} failed: ${errorMessage}`)
+    }
+
+    if (error.message && error.message.includes('timed out')) {
+      logger.error(`❌ OAuth ${stepLabel} failed with network error`, {
+        step,
         message: error.message,
         code: error.code,
         hasProxy: !!proxyConfig
       })
-      throw new Error('Token exchange failed: No response from server (network error or timeout)')
-    } else {
-      // 其他错误
-      logger.error('❌ OAuth token exchange failed with unknown error', {
-        message: error.message,
-        stack: error.stack
-      })
-      throw new Error(`Token exchange failed: ${error.message}`)
+      throw new Error(
+        `OAuth ${stepLabel} failed: No response from server (network error or timeout)`
+      )
     }
+
+    logger.error(`❌ OAuth ${stepLabel} failed with unknown error`, {
+      step,
+      message: error.message,
+      stack: error.stack
+    })
+    throw new Error(`OAuth ${stepLabel} failed: ${error.message}`)
   }
 }
 
 /**
  * 解析回调 URL 或授权码
  * @param {string} input - 完整的回调 URL 或直接的授权码
- * @returns {string} 授权码
+ * @returns {{authorizationCode: string, redirectUri: string|null}} 授权码和redirect_uri
  */
 function parseCallbackUrl(input) {
   if (!input || typeof input !== 'string') {
@@ -331,7 +637,10 @@ function parseCallbackUrl(input) {
         throw new Error('回调 URL 中未找到授权码 (code 参数)')
       }
 
-      return authorizationCode
+      return {
+        authorizationCode,
+        redirectUri: `${urlObj.origin}${urlObj.pathname}`
+      }
     } catch (error) {
       if (error.message.includes('回调 URL 中未找到授权码')) {
         throw error
@@ -355,7 +664,10 @@ function parseCallbackUrl(input) {
     throw new Error('授权码包含无效字符，请检查是否复制了正确的 Authorization Code')
   }
 
-  return cleanedCode
+  return {
+    authorizationCode: cleanedCode,
+    redirectUri: null
+  }
 }
 
 /**
@@ -363,25 +675,32 @@ function parseCallbackUrl(input) {
  * @param {string} authorizationCode - 授权码
  * @param {string} codeVerifier - PKCE code verifier
  * @param {string} state - state 参数
+ * @param {string|null} redirectUri - redirect_uri（可选）
  * @param {object|null} proxyConfig - 代理配置（可选）
  * @returns {Promise<object>} Claude格式的token响应
  */
-async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, proxyConfig = null) {
+async function exchangeSetupTokenCode(
+  authorizationCode,
+  codeVerifier,
+  state,
+  redirectUri = null,
+  proxyConfig = null
+) {
   // 清理授权码，移除URL片段
   const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+  const finalRedirectUri = redirectUri || OAUTH_CONFIG.REDIRECT_URI
 
   const params = {
     grant_type: 'authorization_code',
-    client_id: OAUTH_CONFIG.CLIENT_ID,
     code: cleanedCode,
-    redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
+    redirect_uri: finalRedirectUri,
+    client_id: OAUTH_CONFIG.CLIENT_ID,
     code_verifier: codeVerifier,
-    state,
-    expires_in: 31536000 // Setup Token 可以设置较长的过期时间
+    state
   }
 
-  // 创建代理agent
   const agent = createProxyAgent(proxyConfig)
+  let step = 'hello'
 
   try {
     if (agent) {
@@ -392,6 +711,21 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
       logger.debug('🌐 No proxy configured for Setup Token exchange')
     }
 
+    logger.debug('👋 Sending OAuth hello request (setup token)', {
+      url: `${OAUTH_CONFIG.PLATFORM_BASE_URL}/v1/oauth/hello`,
+      hasProxy: !!proxyConfig,
+      proxyType: proxyConfig?.type || 'none'
+    })
+    await requestOauthHello(proxyConfig)
+
+    step = 'api_hello'
+    logger.debug('👋 Sending API hello request (setup token)', {
+      url: `${OAUTH_CONFIG.API_BASE_URL}/api/hello`,
+      hasProxy: !!proxyConfig
+    })
+    await requestApiHello(proxyConfig)
+
+    step = 'token_exchange'
     logger.debug('🔄 Attempting Setup Token exchange', {
       url: OAUTH_CONFIG.TOKEN_URL,
       codeLength: cleanedCode.length,
@@ -400,38 +734,37 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
       proxyType: proxyConfig?.type || 'none'
     })
 
-    const axiosConfig = {
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-        Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
-      },
+    const payload = JSON.stringify(params)
+    const headers = buildHeaders([
+      ['accept', OAUTH_ACCEPT],
+      ['Accept-Encoding', OAUTH_ACCEPT_ENCODING],
+      ['content-type', 'application/json'],
+      ['user-agent', OAUTH_USER_AGENT],
+      ['Host', 'platform.claude.com'],
+      ['Content-Length', Buffer.byteLength(payload).toString()]
+    ])
+
+    const response = await requestJsonStrict({
+      method: 'POST',
+      url: OAUTH_CONFIG.TOKEN_URL,
+      headers,
+      body: payload,
+      agent,
       timeout: 30000
-    }
-
-    if (agent) {
-      axiosConfig.httpAgent = agent
-      axiosConfig.httpsAgent = agent
-      axiosConfig.proxy = false
-    }
-
-    const response = await axios.post(OAUTH_CONFIG.TOKEN_URL, params, axiosConfig)
+    })
 
     // 记录完整的响应数据到专门的认证详细日志
     logger.authDetail('Setup Token exchange response', response.data)
 
     // 记录简化版本到主日志
     logger.info('📊 Setup Token exchange response (analyzing for subscription info):', {
-      status: response.status,
+      status: response.statusCode,
       hasData: !!response.data,
       dataKeys: response.data ? Object.keys(response.data) : []
     })
 
     logger.success('✅ Setup Token exchange successful', {
-      status: response.status,
+      status: response.statusCode,
       hasAccessToken: !!response.data?.access_token,
       scopes: response.data?.scope,
       // 尝试提取可能的套餐信息字段
@@ -477,20 +810,26 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
 
     return result
   } catch (error) {
-    // 使用与标准OAuth相同的错误处理逻辑
-    if (error.response) {
-      const { status } = error.response
-      const errorData = error.response.data
+    const stepLabel = step.replace('_', ' ')
 
-      logger.error('❌ Setup Token exchange failed with server error', {
-        status,
-        statusText: error.response.statusText,
-        data: errorData,
-        codeLength: cleanedCode.length,
-        codePrefix: `${cleanedCode.substring(0, 10)}...`
-      })
+    if (error.statusCode) {
+      const errorData = error.data
+      const errorContext = {
+        step,
+        status: error.statusCode,
+        statusText: error.statusText,
+        headers: error.headers,
+        data: errorData
+      }
 
-      let errorMessage = `HTTP ${status}`
+      if (step === 'token_exchange') {
+        errorContext.codeLength = cleanedCode.length
+        errorContext.codePrefix = `${cleanedCode.substring(0, 10)}...`
+      }
+
+      logger.error(`❌ Setup Token ${stepLabel} failed with server error`, errorContext)
+
+      let errorMessage = `HTTP ${error.statusCode}`
       if (errorData) {
         if (typeof errorData === 'string') {
           errorMessage += `: ${errorData}`
@@ -504,23 +843,27 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
         }
       }
 
-      throw new Error(`Setup Token exchange failed: ${errorMessage}`)
-    } else if (error.request) {
-      logger.error('❌ Setup Token exchange failed with network error', {
+      throw new Error(`Setup Token ${stepLabel} failed: ${errorMessage}`)
+    }
+
+    if (error.message && error.message.includes('timed out')) {
+      logger.error(`❌ Setup Token ${stepLabel} failed with network error`, {
+        step,
         message: error.message,
         code: error.code,
         hasProxy: !!proxyConfig
       })
       throw new Error(
-        'Setup Token exchange failed: No response from server (network error or timeout)'
+        `Setup Token ${stepLabel} failed: No response from server (network error or timeout)`
       )
-    } else {
-      logger.error('❌ Setup Token exchange failed with unknown error', {
-        message: error.message,
-        stack: error.stack
-      })
-      throw new Error(`Setup Token exchange failed: ${error.message}`)
     }
+
+    logger.error(`❌ Setup Token ${stepLabel} failed with unknown error`, {
+      step,
+      message: error.message,
+      stack: error.stack
+    })
+    throw new Error(`Setup Token ${stepLabel} failed: ${error.message}`)
   }
 }
 
@@ -850,8 +1193,8 @@ async function oauthWithCookie(sessionKey, proxyConfig = null, isSetupToken = fa
   // 步骤3：交换token
   logger.debug('Step 3/3: Exchanging token...')
   const tokenData = isSetupToken
-    ? await exchangeSetupTokenCode(authorizationCode, codeVerifier, state, proxyConfig)
-    : await exchangeCodeForTokens(authorizationCode, codeVerifier, state, proxyConfig)
+    ? await exchangeSetupTokenCode(authorizationCode, codeVerifier, state, null, proxyConfig)
+    : await exchangeCodeForTokens(authorizationCode, codeVerifier, state, null, proxyConfig)
 
   logger.success('✅ Cookie-based OAuth flow completed', {
     isSetupToken,
@@ -883,6 +1226,7 @@ module.exports = {
   generateAuthUrl,
   generateSetupTokenAuthUrl,
   createProxyAgent,
+  requestJsonStrict,
   // Cookie自动授权相关方法
   buildCookieHeaders,
   getOrganizationInfo,

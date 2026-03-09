@@ -2,11 +2,11 @@ const express = require('express')
 const fs = require('fs')
 const path = require('path')
 const axios = require('axios')
-const claudeAccountService = require('../../services/claudeAccountService')
-const claudeConsoleAccountService = require('../../services/claudeConsoleAccountService')
-const geminiAccountService = require('../../services/geminiAccountService')
-const bedrockAccountService = require('../../services/bedrockAccountService')
-const droidAccountService = require('../../services/droidAccountService')
+const claudeAccountService = require('../../services/account/claudeAccountService')
+const claudeConsoleAccountService = require('../../services/account/claudeConsoleAccountService')
+const geminiAccountService = require('../../services/account/geminiAccountService')
+const bedrockAccountService = require('../../services/account/bedrockAccountService')
+const droidAccountService = require('../../services/account/droidAccountService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
@@ -218,6 +218,11 @@ const defaultOemSettings = {
   publicStatsShowAccountTrends: false, // 显示账号使用趋势
   publicStatsTrendsPeriod: '7d', // 使用趋势时间范围: today, 24h, 7d, 30d
   publicStatsShowSessionWindow: false, // 显示账户会话窗口（负载情况）
+  apiStatsNotice: {
+    enabled: false,
+    title: '',
+    content: ''
+  },
   updatedAt: new Date().toISOString()
 }
 
@@ -272,7 +277,8 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowApiKeysTrends,
       publicStatsShowAccountTrends,
       publicStatsTrendsPeriod,
-      publicStatsShowSessionWindow
+      publicStatsShowSessionWindow,
+      apiStatsNotice
     } = req.body
 
     // 验证输入
@@ -326,6 +332,11 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowAccountTrends: publicStatsShowAccountTrends === true, // 默认为false
       publicStatsTrendsPeriod: trendsPeriodValue, // 趋势时间范围
       publicStatsShowSessionWindow: publicStatsShowSessionWindow === true, // 默认为false，显示账户会话窗口
+      apiStatsNotice: {
+        enabled: apiStatsNotice?.enabled === true,
+        title: (apiStatsNotice?.title || '').trim().slice(0, 100),
+        content: (apiStatsNotice?.content || '').trim().slice(0, 2000)
+      },
       updatedAt: new Date().toISOString()
     }
 
@@ -1004,5 +1015,48 @@ async function getPublicSessionWindowData(claudeAccounts, claudeConsoleAccounts)
     return []
   }
 }
+
+// ==================== 模型价格管理 ====================
+
+const pricingService = require('../../services/pricingService')
+
+// 获取所有模型价格数据
+router.get('/models/pricing', authenticateAdmin, async (req, res) => {
+  try {
+    if (!pricingService.pricingData || Object.keys(pricingService.pricingData).length === 0) {
+      await pricingService.loadPricingData()
+    }
+    const data = pricingService.pricingData
+    res.json({
+      success: true,
+      data: data || {}
+    })
+  } catch (error) {
+    logger.error('Failed to get model pricing:', error)
+    res.status(500).json({ error: 'Failed to get model pricing', message: error.message })
+  }
+})
+
+// 获取价格服务状态
+router.get('/models/pricing/status', authenticateAdmin, async (req, res) => {
+  try {
+    const status = pricingService.getStatus()
+    res.json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Failed to get pricing status:', error)
+    res.status(500).json({ error: 'Failed to get pricing status', message: error.message })
+  }
+})
+
+// 强制刷新价格数据
+router.post('/models/pricing/refresh', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pricingService.forceUpdate()
+    res.json({ success: result.success, message: result.message })
+  } catch (error) {
+    logger.error('Failed to refresh pricing:', error)
+    res.status(500).json({ error: 'Failed to refresh pricing', message: error.message })
+  }
+})
 
 module.exports = router

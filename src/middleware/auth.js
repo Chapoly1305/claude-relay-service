@@ -9,6 +9,7 @@ const ClientValidator = require('../validators/clientValidator')
 const ClaudeCodeValidator = require('../validators/clients/claudeCodeValidator')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const { calculateWaitTimeStats } = require('../utils/statsHelper')
+const { isClaudeFamilyModel } = require('../utils/modelHelper')
 
 // 工具函数
 function sleep(ms) {
@@ -451,7 +452,7 @@ const authenticateApiKey = async (req, res, next) => {
     }
 
     if (!apiKey) {
-      logger.security(`🔒 Missing API key attempt from ${req.ip || 'unknown'}`)
+      logger.security(`Missing API key attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Missing API key',
         message:
@@ -461,7 +462,7 @@ const authenticateApiKey = async (req, res, next) => {
 
     // 基本API Key格式验证
     if (typeof apiKey !== 'string' || apiKey.length < 10 || apiKey.length > 512) {
-      logger.security(`🔒 Invalid API key format from ${req.ip || 'unknown'}`)
+      logger.security(`Invalid API key format from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid API key format',
         message: 'API key format is invalid'
@@ -473,7 +474,7 @@ const authenticateApiKey = async (req, res, next) => {
 
     if (!validation.valid) {
       const clientIP = req.ip || req.connection?.remoteAddress || 'unknown'
-      logger.security(`🔒 Invalid API key attempt: ${validation.error} from ${clientIP}`)
+      logger.security(`Invalid API key attempt: ${validation.error} from ${clientIP}`)
       return res.status(401).json({
         error: 'Invalid API key',
         message: validation.error
@@ -1195,12 +1196,16 @@ const authenticateApiKey = async (req, res, next) => {
           }), cost: $${dailyCost.toFixed(2)}/$${dailyCostLimit}`
         )
 
-        return res.status(429).json({
-          error: 'Daily cost limit exceeded',
-          message: `已达到每日费用限制 ($${dailyCostLimit})`,
+        // 使用 402 Payment Required 而非 429，避免客户端自动重试
+        return res.status(402).json({
+          error: {
+            type: 'insufficient_quota',
+            message: `已达到每日费用限制 ($${dailyCostLimit})`,
+            code: 'daily_cost_limit_exceeded'
+          },
           currentCost: dailyCost,
           costLimit: dailyCostLimit,
-          resetAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString() // 明天0点重置
+          resetAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString()
         })
       }
 
@@ -1224,9 +1229,13 @@ const authenticateApiKey = async (req, res, next) => {
           }), cost: $${totalCost.toFixed(2)}/$${totalCostLimit}`
         )
 
-        return res.status(429).json({
-          error: 'Total cost limit exceeded',
-          message: `已达到总费用限制 ($${totalCostLimit})`,
+        // 使用 402 Payment Required 而非 429，避免客户端自动重试
+        return res.status(402).json({
+          error: {
+            type: 'insufficient_quota',
+            message: `已达到总费用限制 ($${totalCostLimit})`,
+            code: 'total_cost_limit_exceeded'
+          },
           currentCost: totalCost,
           costLimit: totalCostLimit
         })
@@ -1239,44 +1248,45 @@ const authenticateApiKey = async (req, res, next) => {
       )
     }
 
-    // 检查 Opus 周费用限制（仅对 Opus 模型生效）
+    // 检查 Claude 周费用限制
     const weeklyOpusCostLimit = validation.keyData.weeklyOpusCostLimit || 0
     if (weeklyOpusCostLimit > 0) {
       // 从请求中获取模型信息
       const requestBody = req.body || {}
       const model = requestBody.model || ''
 
-      // 判断是否为 Opus 模型
-      if (model && model.toLowerCase().includes('claude-opus')) {
+      // 判断是否为 Claude 模型
+      if (isClaudeFamilyModel(model)) {
         const weeklyOpusCost = validation.keyData.weeklyOpusCost || 0
 
         if (weeklyOpusCost >= weeklyOpusCostLimit) {
           logger.security(
-            `💰 Weekly Opus cost limit exceeded for key: ${validation.keyData.id} (${
+            `💰 Weekly Claude cost limit exceeded for key: ${validation.keyData.id} (${
               validation.keyData.name
             }), cost: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
           )
 
-          // 计算下周一的重置时间
-          const now = new Date()
-          const dayOfWeek = now.getDay()
-          const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek) % 7 || 7
-          const resetDate = new Date(now)
-          resetDate.setDate(now.getDate() + daysUntilMonday)
-          resetDate.setHours(0, 0, 0, 0)
+          // 计算下次重置时间（基于 API Key 配置的重置日/时）
+          const resetDay = validation.keyData.weeklyResetDay || 1
+          const resetHour = validation.keyData.weeklyResetHour || 0
+          const resetDate = redis.getNextResetTime(resetDay, resetHour)
 
-          return res.status(429).json({
-            error: 'Weekly Opus cost limit exceeded',
-            message: `已达到 Opus 模型周费用限制 ($${weeklyOpusCostLimit})`,
+          // 使用 402 Payment Required 而非 429，避免客户端自动重试
+          return res.status(402).json({
+            error: {
+              type: 'insufficient_quota',
+              message: `已达到 Claude 模型周费用限制 ($${weeklyOpusCostLimit})`,
+              code: 'weekly_opus_cost_limit_exceeded'
+            },
             currentCost: weeklyOpusCost,
             costLimit: weeklyOpusCostLimit,
-            resetAt: resetDate.toISOString() // 下周一重置
+            resetAt: resetDate.toISOString()
           })
         }
 
-        // 记录当前 Opus 费用使用情况
+        // 记录当前 Claude 费用使用情况
         logger.api(
-          `💰 Opus weekly cost usage for key: ${validation.keyData.id} (${
+          `💰 Claude weekly cost usage for key: ${validation.keyData.id} (${
             validation.keyData.name
           }), current: $${weeklyOpusCost.toFixed(2)}/$${weeklyOpusCostLimit}`
         )
@@ -1303,13 +1313,12 @@ const authenticateApiKey = async (req, res, next) => {
       restrictedModels: validation.keyData.restrictedModels,
       enableClientRestriction: validation.keyData.enableClientRestriction,
       allowedClients: validation.keyData.allowedClients,
+      allow1mContext: validation.keyData.allow1mContext,
       dailyCostLimit: validation.keyData.dailyCostLimit,
       dailyCost: validation.keyData.dailyCost,
       totalCostLimit: validation.keyData.totalCostLimit,
-      totalCost: validation.keyData.totalCost,
-      usage: validation.keyData.usage
+      totalCost: validation.keyData.totalCost
     }
-    req.usage = validation.keyData.usage
 
     const authDuration = Date.now() - startTime
     const userAgent = req.headers['user-agent'] || 'No User-Agent'
@@ -1357,7 +1366,7 @@ const authenticateAdmin = async (req, res, next) => {
       req.headers['x-admin-token']
 
     if (!token) {
-      logger.security(`🔒 Missing admin token attempt from ${req.ip || 'unknown'}`)
+      logger.security(`Missing admin token attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Missing admin token',
         message: 'Please provide an admin token'
@@ -1366,7 +1375,7 @@ const authenticateAdmin = async (req, res, next) => {
 
     // 基本token格式验证
     if (typeof token !== 'string' || token.length < 32 || token.length > 512) {
-      logger.security(`🔒 Invalid admin token format from ${req.ip || 'unknown'}`)
+      logger.security(`Invalid admin token format from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid admin token format',
         message: 'Admin token format is invalid'
@@ -1382,7 +1391,7 @@ const authenticateAdmin = async (req, res, next) => {
     ])
 
     if (!adminSession || Object.keys(adminSession).length === 0) {
-      logger.security(`🔒 Invalid admin token attempt from ${req.ip || 'unknown'}`)
+      logger.security(`Invalid admin token attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid admin token',
         message: 'Invalid or expired admin session'
@@ -1440,7 +1449,8 @@ const authenticateAdmin = async (req, res, next) => {
     }
 
     const authDuration = Date.now() - startTime
-    logger.security(`🔐 Admin authenticated: ${adminSession.username} in ${authDuration}ms`)
+    req._authInfo = `${adminSession.username} ${authDuration}ms`
+    logger.security(`Admin authenticated: ${adminSession.username} in ${authDuration}ms`)
 
     return next()
   } catch (error) {
@@ -1471,7 +1481,7 @@ const authenticateUser = async (req, res, next) => {
       req.headers['x-user-token']
 
     if (!sessionToken) {
-      logger.security(`🔒 Missing user session token attempt from ${req.ip || 'unknown'}`)
+      logger.security(`Missing user session token attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Missing user session token',
         message: 'Please login to access this resource'
@@ -1480,7 +1490,7 @@ const authenticateUser = async (req, res, next) => {
 
     // 基本token格式验证
     if (typeof sessionToken !== 'string' || sessionToken.length < 32 || sessionToken.length > 128) {
-      logger.security(`🔒 Invalid user session token format from ${req.ip || 'unknown'}`)
+      logger.security(`Invalid user session token format from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid session token format',
         message: 'Session token format is invalid'
@@ -1491,7 +1501,7 @@ const authenticateUser = async (req, res, next) => {
     const sessionValidation = await userService.validateUserSession(sessionToken)
 
     if (!sessionValidation) {
-      logger.security(`🔒 Invalid user session token attempt from ${req.ip || 'unknown'}`)
+      logger.security(`Invalid user session token attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid session token',
         message: 'Invalid or expired user session'
@@ -1582,7 +1592,8 @@ const authenticateUserOrAdmin = async (req, res, next) => {
             req.userType = 'admin'
 
             const authDuration = Date.now() - startTime
-            logger.security(`🔐 Admin authenticated: ${adminSession.username} in ${authDuration}ms`)
+            req._authInfo = `${adminSession.username} ${authDuration}ms`
+            logger.security(`Admin authenticated: ${adminSession.username} in ${authDuration}ms`)
             return next()
           }
         }
@@ -1623,7 +1634,7 @@ const authenticateUserOrAdmin = async (req, res, next) => {
     }
 
     // 如果都失败了，返回未授权
-    logger.security(`🔒 Authentication failed from ${req.ip || 'unknown'}`)
+    logger.security(`Authentication failed from ${req.ip || 'unknown'}`)
     return res.status(401).json({
       error: 'Authentication required',
       message: 'Please login as user or admin to access this resource'
@@ -1762,67 +1773,80 @@ const requestLogger = (req, res, next) => {
   const userAgent = req.get('User-Agent') || 'unknown'
   const referer = req.get('Referer') || 'none'
 
-  // 记录请求开始
+  // 请求开始 → debug 级别（减少正常请求的日志量）
   const isDebugRoute = req.originalUrl.includes('event_logging')
   if (req.originalUrl !== '/health') {
-    if (isDebugRoute) {
-      logger.debug(`▶️ [${requestId}] ${req.method} ${req.originalUrl} | IP: ${clientIP}`)
-    } else {
-      logger.info(`▶️ [${requestId}] ${req.method} ${req.originalUrl} | IP: ${clientIP}`)
-    }
+    logger.debug(`▶ [${requestId}] ${req.method} ${req.originalUrl}`, {
+      ip: clientIP,
+      body: req.body && Object.keys(req.body).length > 0 ? req.body : undefined
+    })
+  }
+
+  // 拦截 res.json() 捕获响应体
+  const originalJson = res.json.bind(res)
+  res.json = (body) => {
+    res._responseBody = body
+    return originalJson(body)
   }
 
   res.on('finish', () => {
+    if (req.originalUrl === '/health') {
+      return
+    }
     const duration = Date.now() - start
     const contentLength = res.get('Content-Length') || '0'
+    const status = res.statusCode
 
-    // 构建日志元数据
-    const logMetadata = {
-      requestId,
-      method: req.method,
-      url: req.originalUrl,
-      status: res.statusCode,
-      duration,
-      contentLength,
-      ip: clientIP,
-      userAgent,
-      referer
+    // 状态 emoji
+    const emoji = status >= 500 ? '❌' : status >= 400 ? '⚠️ ' : '🟢'
+    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info'
+
+    // 主消息行
+    const msg = `${emoji} ${status} ${req.method} ${req.originalUrl}  ${duration}ms ${contentLength}B`
+
+    // 构建树形 metadata
+    const meta = { requestId }
+
+    // 请求体（非 GET 且有内容时显示）
+    if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
+      meta.req = req.body
     }
 
-    // 根据状态码选择日志级别
-    if (res.statusCode >= 500) {
-      logger.error(
-        `◀️ [${requestId}] ${req.method} ${req.originalUrl} | ${res.statusCode} | ${duration}ms | ${contentLength}B`,
-        logMetadata
-      )
-    } else if (res.statusCode >= 400) {
-      logger.warn(
-        `◀️ [${requestId}] ${req.method} ${req.originalUrl} | ${res.statusCode} | ${duration}ms | ${contentLength}B`,
-        logMetadata
-      )
-    } else if (req.originalUrl !== '/health') {
-      if (isDebugRoute) {
-        logger.debug(
-          `🟢 ${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms)`,
-          logMetadata
-        )
-      } else {
-        logger.request(req.method, req.originalUrl, res.statusCode, duration, logMetadata)
-      }
+    // 查询参数（GET 请求且有查询参数时单独显示）
+    const queryIdx = req.originalUrl.indexOf('?')
+    if (queryIdx > -1) {
+      meta.query = req.originalUrl.substring(queryIdx + 1)
     }
 
-    // API Key相关日志
+    // 响应体
+    if (res._responseBody) {
+      meta.res = res._responseBody
+    }
+
+    // API Key 信息（合并到同一条日志）
     if (req.apiKey) {
-      logger.api(
-        `📱 [${requestId}] Request from ${req.apiKey.name} (${req.apiKey.id}) | ${duration}ms`
-      )
+      meta.key = `${req.apiKey.name} (${req.apiKey.id})`
+    }
+
+    // 认证信息
+    if (req._authInfo) {
+      meta.auth = req._authInfo
+    }
+
+    // 完整信息写入文件
+    meta.ip = clientIP
+    meta.ua = userAgent
+    meta.referer = referer
+
+    if (isDebugRoute) {
+      logger.debug(msg, meta)
+    } else {
+      logger[level](msg, meta)
     }
 
     // 慢请求警告
     if (duration > 5000) {
-      logger.warn(
-        `🐌 [${requestId}] Slow request detected: ${duration}ms for ${req.method} ${req.originalUrl}`
-      )
+      logger.warn(`🐌 Slow request: ${duration}ms ${req.method} ${req.originalUrl}`)
     }
   })
 

@@ -4,7 +4,8 @@
  */
 
 const express = require('express')
-const openaiResponsesAccountService = require('../../services/openaiResponsesAccountService')
+const axios = require('axios')
+const openaiResponsesAccountService = require('../../services/account/openaiResponsesAccountService')
 const apiKeyService = require('../../services/apiKeyService')
 const accountGroupService = require('../../services/accountGroupService')
 const redis = require('../../models/redis')
@@ -12,6 +13,8 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const webhookNotifier = require('../../utils/webhookNotifier')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
+const { createOpenAITestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
+const { getProxyAgent } = require('../../utils/proxyHelper')
 
 const router = express.Router()
 
@@ -39,92 +42,97 @@ router.get('/openai-responses-accounts', authenticateAdmin, async (req, res) => 
       }
     }
 
-    // 处理额度信息、使用统计和绑定的 API Key 数量
-    const accountsWithStats = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          // 检查是否需要重置额度
-          const today = redis.getDateStringInTimezone()
-          if (account.lastResetDate !== today) {
-            // 今天还没重置过，需要重置
-            await openaiResponsesAccountService.updateAccount(account.id, {
-              dailyUsage: '0',
-              lastResetDate: today,
-              quotaStoppedAt: ''
-            })
-            account.dailyUsage = '0'
-            account.lastResetDate = today
-            account.quotaStoppedAt = ''
-          }
+    const accountIds = accounts.map((a) => a.id)
 
-          // 检查并清除过期的限流状态
-          await openaiResponsesAccountService.checkAndClearRateLimit(account.id)
+    // 并行获取：轻量 API Keys + 分组信息 + daily cost + 清理限流状态
+    const [allApiKeys, allGroupInfosMap, dailyCostMap] = await Promise.all([
+      apiKeyService.getAllApiKeysLite(),
+      accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai'),
+      redis.batchGetAccountDailyCost(accountIds),
+      // 批量清理限流状态
+      Promise.all(accountIds.map((id) => openaiResponsesAccountService.checkAndClearRateLimit(id)))
+    ])
 
-          // 获取使用统计信息
-          let usageStats
-          try {
-            usageStats = await redis.getAccountUsageStats(account.id, 'openai-responses')
-          } catch (error) {
-            logger.debug(
-              `Failed to get usage stats for OpenAI-Responses account ${account.id}:`,
-              error
-            )
-            usageStats = {
-              daily: { requests: 0, tokens: 0, allTokens: 0 },
-              total: { requests: 0, tokens: 0, allTokens: 0 },
-              monthly: { requests: 0, tokens: 0, allTokens: 0 }
-            }
-          }
+    // 单次遍历构建绑定数映射（只算直连，不算 group）
+    const bindingCountMap = new Map()
+    for (const key of allApiKeys) {
+      const binding = key.openaiAccountId
+      if (!binding) {
+        continue
+      }
+      // 处理 responses: 前缀
+      const accountId = binding.startsWith('responses:') ? binding.substring(10) : binding
+      bindingCountMap.set(accountId, (bindingCountMap.get(accountId) || 0) + 1)
+    }
 
-          // 计算绑定的API Key数量（支持 responses: 前缀）
-          const allKeys = await redis.getAllApiKeys()
-          let boundCount = 0
+    // 批量获取使用统计（不含 daily cost，已单独获取）
+    const client = redis.getClientSafe()
+    const today = redis.getDateStringInTimezone()
+    const tzDate = redis.getDateInTimezone()
+    const currentMonth = `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(2, '0')}`
 
-          for (const key of allKeys) {
-            // 检查是否绑定了该账户（包括 responses: 前缀）
-            if (
-              key.openaiAccountId === account.id ||
-              key.openaiAccountId === `responses:${account.id}`
-            ) {
-              boundCount++
-            }
-          }
+    const statsPipeline = client.pipeline()
+    for (const accountId of accountIds) {
+      statsPipeline.hgetall(`account_usage:${accountId}`)
+      statsPipeline.hgetall(`account_usage:daily:${accountId}:${today}`)
+      statsPipeline.hgetall(`account_usage:monthly:${accountId}:${currentMonth}`)
+    }
+    const statsResults = await statsPipeline.exec()
 
-          // 调试日志：检查绑定计数
-          if (boundCount > 0) {
-            logger.info(`OpenAI-Responses account ${account.id} has ${boundCount} bound API keys`)
-          }
+    // 处理统计数据
+    const allUsageStatsMap = new Map()
+    for (let i = 0; i < accountIds.length; i++) {
+      const accountId = accountIds[i]
+      const [errTotal, total] = statsResults[i * 3]
+      const [errDaily, daily] = statsResults[i * 3 + 1]
+      const [errMonthly, monthly] = statsResults[i * 3 + 2]
 
-          // 获取分组信息
-          const groupInfos = await accountGroupService.getAccountGroups(account.id)
-
-          const formattedAccount = formatAccountExpiry(account)
-          return {
-            ...formattedAccount,
-            groupInfos,
-            boundApiKeysCount: boundCount,
-            usage: {
-              daily: usageStats.daily,
-              total: usageStats.total,
-              monthly: usageStats.monthly
-            }
-          }
-        } catch (error) {
-          logger.error(`Failed to process OpenAI-Responses account ${account.id}:`, error)
-          const formattedAccount = formatAccountExpiry(account)
-          return {
-            ...formattedAccount,
-            groupInfos: [],
-            boundApiKeysCount: 0,
-            usage: {
-              daily: { requests: 0, tokens: 0, allTokens: 0 },
-              total: { requests: 0, tokens: 0, allTokens: 0 },
-              monthly: { requests: 0, tokens: 0, allTokens: 0 }
-            }
-          }
-        }
+      const parseUsage = (data) => ({
+        requests: parseInt(data?.totalRequests || data?.requests) || 0,
+        tokens: parseInt(data?.totalTokens || data?.tokens) || 0,
+        inputTokens: parseInt(data?.totalInputTokens || data?.inputTokens) || 0,
+        outputTokens: parseInt(data?.totalOutputTokens || data?.outputTokens) || 0,
+        cacheCreateTokens: parseInt(data?.totalCacheCreateTokens || data?.cacheCreateTokens) || 0,
+        cacheReadTokens: parseInt(data?.totalCacheReadTokens || data?.cacheReadTokens) || 0,
+        allTokens:
+          parseInt(data?.totalAllTokens || data?.allTokens) ||
+          (parseInt(data?.totalInputTokens || data?.inputTokens) || 0) +
+            (parseInt(data?.totalOutputTokens || data?.outputTokens) || 0) +
+            (parseInt(data?.totalCacheCreateTokens || data?.cacheCreateTokens) || 0) +
+            (parseInt(data?.totalCacheReadTokens || data?.cacheReadTokens) || 0)
       })
-    )
+
+      allUsageStatsMap.set(accountId, {
+        total: errTotal ? {} : parseUsage(total),
+        daily: errDaily ? {} : parseUsage(daily),
+        monthly: errMonthly ? {} : parseUsage(monthly)
+      })
+    }
+
+    // 处理额度信息、使用统计和绑定的 API Key 数量
+    const accountsWithStats = accounts.map((account) => {
+      const usageStats = allUsageStatsMap.get(account.id) || {
+        daily: { requests: 0, tokens: 0, allTokens: 0 },
+        total: { requests: 0, tokens: 0, allTokens: 0 },
+        monthly: { requests: 0, tokens: 0, allTokens: 0 }
+      }
+
+      const groupInfos = allGroupInfosMap.get(account.id) || []
+      const boundCount = bindingCountMap.get(account.id) || 0
+      const dailyCost = dailyCostMap.get(account.id) || 0
+
+      const formattedAccount = formatAccountExpiry(account)
+      return {
+        ...formattedAccount,
+        groupInfos,
+        boundApiKeysCount: boundCount,
+        usage: {
+          daily: { ...usageStats.daily, cost: dailyCost },
+          total: usageStats.total,
+          monthly: usageStats.monthly
+        }
+      }
+    })
 
     res.json({ success: true, data: accountsWithStats })
   } catch (error) {
@@ -413,7 +421,7 @@ router.post('/openai-responses-accounts/:id/reset-status', authenticateAdmin, as
 
     const result = await openaiResponsesAccountService.resetAccountStatus(id)
 
-    logger.success(`✅ Admin reset status for OpenAI-Responses account: ${id}`)
+    logger.success(`Admin reset status for OpenAI-Responses account: ${id}`)
     return res.json({ success: true, data: result })
   } catch (error) {
     logger.error('❌ Failed to reset OpenAI-Responses account status:', error)
@@ -432,7 +440,7 @@ router.post('/openai-responses-accounts/:id/reset-usage', authenticateAdmin, asy
       quotaStoppedAt: ''
     })
 
-    logger.success(`✅ Admin manually reset daily usage for OpenAI-Responses account ${id}`)
+    logger.success(`Admin manually reset daily usage for OpenAI-Responses account ${id}`)
 
     res.json({
       success: true,
@@ -443,6 +451,99 @@ router.post('/openai-responses-accounts/:id/reset-usage', authenticateAdmin, asy
     res.status(500).json({
       success: false,
       error: error.message
+    })
+  }
+})
+
+// 测试 OpenAI-Responses 账户连通性
+router.post('/openai-responses-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+  const { model = 'gpt-4o-mini' } = req.body
+  const startTime = Date.now()
+
+  try {
+    // 获取账户信息（apiKey 已自动解密）
+    const account = await openaiResponsesAccountService.getAccount(accountId)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+
+    if (!account.apiKey) {
+      return res.status(401).json({ error: 'API Key not found or decryption failed' })
+    }
+
+    // 构造测试请求（根据 providerEndpoint 和 baseApi 决定端点路径）
+    const baseUrl = account.baseApi || 'https://api.openai.com'
+    const providerEndpoint = account.providerEndpoint || 'responses'
+    let endpointPath = '/responses'
+    if (providerEndpoint === 'auto') {
+      endpointPath = '/responses' // 测试时默认用 responses
+    }
+    // 防止 baseApi 已含 /v1 时路径重复
+    if (!baseUrl.endsWith('/v1')) {
+      endpointPath = `/v1${endpointPath}`
+    }
+    const apiUrl = `${baseUrl}${endpointPath}`
+    const payload = createOpenAITestPayload(model, { stream: false })
+
+    const requestConfig = {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${account.apiKey}`
+      },
+      timeout: 30000
+    }
+
+    // 配置代理
+    if (account.proxy) {
+      const agent = getProxyAgent(account.proxy)
+      if (agent) {
+        requestConfig.httpsAgent = agent
+        requestConfig.httpAgent = agent
+      }
+    }
+
+    const response = await axios.post(apiUrl, payload, requestConfig)
+    const latency = Date.now() - startTime
+
+    // 提取响应文本（Responses API 格式）
+    let responseText = ''
+    const output = response.data?.output
+    if (Array.isArray(output)) {
+      for (const item of output) {
+        if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const block of item.content) {
+            if (block.type === 'output_text' && block.text) {
+              responseText += block.text
+            }
+          }
+        }
+      }
+    }
+
+    logger.success(
+      `✅ OpenAI-Responses account test passed: ${account.name} (${accountId}), latency: ${latency}ms`
+    )
+
+    return res.json({
+      success: true,
+      data: {
+        accountId,
+        accountName: account.name,
+        model,
+        latency,
+        responseText: responseText.substring(0, 200)
+      }
+    })
+  } catch (error) {
+    const latency = Date.now() - startTime
+    logger.error(`❌ OpenAI-Responses account test failed: ${accountId}`, error.message)
+
+    return res.status(500).json({
+      success: false,
+      error: 'Test failed',
+      message: extractErrorMessage(error.response?.data, error.message),
+      latency
     })
   }
 })

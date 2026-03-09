@@ -34,8 +34,8 @@ const fs = require('fs')
 const path = require('path')
 const logger = require('../utils/logger')
 const { getProjectRoot } = require('../utils/projectPaths')
-const geminiAccountService = require('./geminiAccountService')
-const unifiedGeminiScheduler = require('./unifiedGeminiScheduler')
+const geminiAccountService = require('./account/geminiAccountService')
+const unifiedGeminiScheduler = require('./scheduler/unifiedGeminiScheduler')
 const sessionHelper = require('../utils/sessionHelper')
 const signatureCache = require('../utils/signatureCache')
 const apiKeyService = require('./apiKeyService')
@@ -1800,7 +1800,14 @@ function dumpToolsPayload({ vendor, model, tools, toolChoice }) {
  * 更新速率限制计数器
  * 跟踪 token 使用量和成本
  */
-async function applyRateLimitTracking(rateLimitInfo, usageSummary, model, context = '') {
+async function applyRateLimitTracking(
+  rateLimitInfo,
+  usageSummary,
+  model,
+  context = '',
+  keyId = null,
+  preCalculatedCost = null
+) {
   if (!rateLimitInfo) {
     return
   }
@@ -1811,7 +1818,10 @@ async function applyRateLimitTracking(rateLimitInfo, usageSummary, model, contex
     const { totalTokens, totalCost } = await updateRateLimitCounters(
       rateLimitInfo,
       usageSummary,
-      model
+      model,
+      keyId,
+      'gemini',
+      preCalculatedCost
     )
     if (totalTokens > 0) {
       logger.api(`📊 Updated rate limit token count${label}: +${totalTokens} tokens`)
@@ -2127,20 +2137,23 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
         : mapGeminiFinishReasonToAnthropicStopReason(finishReason)
 
       if (req.apiKey?.id && (inputTokens > 0 || outputTokens > 0)) {
-        await apiKeyService.recordUsage(
+        const bridgeCosts = await apiKeyService.recordUsage(
           req.apiKey.id,
           inputTokens,
           outputTokens,
           0,
           0,
           effectiveModel,
-          accountId
+          accountId,
+          'gemini'
         )
         await applyRateLimitTracking(
           req.rateLimitInfo,
           { inputTokens, outputTokens, cacheCreateTokens: 0, cacheReadTokens: 0 },
           effectiveModel,
-          'anthropic-messages'
+          'anthropic-messages',
+          req.apiKey?.id,
+          bridgeCosts
         )
       }
 
@@ -2316,7 +2329,7 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
     // [大东的 2.0 补丁 - 修复版] 活跃度看门狗 (Watchdog)
     // ========================================================================
     let activityTimeout = null
-    const STREAM_ACTIVITY_TIMEOUT_MS = 45000 // 45秒无数据视为卡死
+    const STREAM_ACTIVITY_TIMEOUT_MS = 90000 // 90秒无数据视为卡死
 
     const resetActivityTimeout = () => {
       if (activityTimeout) {
@@ -2665,20 +2678,23 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
       }
 
       if (req.apiKey?.id && (inputTokens > 0 || outputTokens > 0)) {
-        await apiKeyService.recordUsage(
+        const bridgeStreamCosts = await apiKeyService.recordUsage(
           req.apiKey.id,
           inputTokens,
           outputTokens,
           0,
           0,
           effectiveModel,
-          accountId
+          accountId,
+          'gemini'
         )
         await applyRateLimitTracking(
           req.rateLimitInfo,
           { inputTokens, outputTokens, cacheCreateTokens: 0, cacheReadTokens: 0 },
           effectiveModel,
-          'anthropic-messages-stream'
+          'anthropic-messages-stream',
+          req.apiKey?.id,
+          bridgeStreamCosts
         )
       }
     }

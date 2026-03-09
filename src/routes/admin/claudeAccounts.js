@@ -6,8 +6,8 @@
 const express = require('express')
 const router = express.Router()
 
-const claudeAccountService = require('../../services/claudeAccountService')
-const claudeRelayService = require('../../services/claudeRelayService')
+const claudeAccountService = require('../../services/account/claudeAccountService')
+const claudeRelayService = require('../../services/relay/claudeRelayService')
 const accountGroupService = require('../../services/accountGroupService')
 const accountTestSchedulerService = require('../../services/accountTestSchedulerService')
 const apiKeyService = require('../../services/apiKeyService')
@@ -17,7 +17,38 @@ const logger = require('../../utils/logger')
 const oauthHelper = require('../../utils/oauthHelper')
 const CostCalculator = require('../../utils/costCalculator')
 const webhookNotifier = require('../../utils/webhookNotifier')
+const {
+  isEmptyValue,
+  parseBooleanLike,
+  normalizeOptionalNonNegativeInteger
+} = require('../../utils/tempUnavailablePolicy')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
+
+const TEMP_UNAVAILABLE_TTL_FIELDS = ['tempUnavailable503TtlSeconds', 'tempUnavailable5xxTtlSeconds']
+
+const normalizeTempUnavailablePolicyPayload = (payload, options = {}) => {
+  const { partial = false } = options
+  const normalized = {}
+
+  for (const field of TEMP_UNAVAILABLE_TTL_FIELDS) {
+    if (partial && !Object.prototype.hasOwnProperty.call(payload, field)) {
+      continue
+    }
+
+    const rawValue = payload[field]
+    const parsedValue = normalizeOptionalNonNegativeInteger(rawValue)
+    if (!isEmptyValue(rawValue) && parsedValue === null) {
+      return { error: `${field} must be a non-negative integer` }
+    }
+    normalized[field] = parsedValue
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(payload, 'disableTempUnavailable')) {
+    normalized.disableTempUnavailable = parseBooleanLike(payload.disableTempUnavailable)
+  }
+
+  return { normalized }
+}
 
 // 生成OAuth授权URL
 router.post('/claude-accounts/generate-auth-url', authenticateAdmin, async (req, res) => {
@@ -36,7 +67,7 @@ router.post('/claude-accounts/generate-auth-url', authenticateAdmin, async (req,
       expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() // 10分钟过期
     })
 
-    logger.success('🔗 Generated OAuth authorization URL with proxy support')
+    logger.success('Generated OAuth authorization URL with proxy support')
     return res.json({
       success: true,
       data: {
@@ -156,7 +187,7 @@ router.post('/claude-accounts/generate-setup-token-url', authenticateAdmin, asyn
       expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString() // 10分钟过期
     })
 
-    logger.success('🔗 Generated Setup Token authorization URL with proxy support')
+    logger.success('Generated Setup Token authorization URL with proxy support')
     return res.json({
       success: true,
       data: {
@@ -425,6 +456,14 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
                 cache_read_input_tokens: usage.cacheReadTokens
               }
 
+              // 添加 cache_creation 子对象以支持精确 ephemeral 定价
+              if (usage.ephemeral5mTokens > 0 || usage.ephemeral1hTokens > 0) {
+                usageData.cache_creation = {
+                  ephemeral_5m_input_tokens: usage.ephemeral5mTokens,
+                  ephemeral_1h_input_tokens: usage.ephemeral1hTokens
+                }
+              }
+
               logger.debug(`💰 Calculating cost for model ${modelName}:`, JSON.stringify(usageData))
               const costResult = CostCalculator.calculateCost(usageData, modelName)
               logger.debug(`💰 Cost result for ${modelName}: total=${costResult.costs.total}`)
@@ -592,7 +631,10 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       expiresAt,
       extInfo,
       maxConcurrency,
-      interceptWarmup
+      interceptWarmup,
+      disableTempUnavailable,
+      tempUnavailable503TtlSeconds,
+      tempUnavailable5xxTtlSeconds
     } = req.body
 
     if (!name) {
@@ -621,6 +663,16 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Priority must be a number between 1 and 100' })
     }
 
+    const { normalized: normalizedTempUnavailablePolicy, error: tempUnavailablePolicyError } =
+      normalizeTempUnavailablePolicyPayload({
+        disableTempUnavailable,
+        tempUnavailable503TtlSeconds,
+        tempUnavailable5xxTtlSeconds
+      })
+    if (tempUnavailablePolicyError) {
+      return res.status(400).json({ error: tempUnavailablePolicyError })
+    }
+
     const createOptions = {
       name,
       description,
@@ -636,10 +688,12 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       expiresAt: expiresAt || null, // 账户订阅到期时间
       extInfo: extInfo || null,
       maxConcurrency: maxConcurrency || 0, // 账户级串行队列：0=使用全局配置，>0=强制启用
-      interceptWarmup: interceptWarmup === true // 拦截预热请求：默认为false
+      interceptWarmup: interceptWarmup === true, // 拦截预热请求：默认为false
+      disableTempUnavailable: normalizedTempUnavailablePolicy.disableTempUnavailable,
+      tempUnavailable503TtlSeconds: normalizedTempUnavailablePolicy.tempUnavailable503TtlSeconds,
+      tempUnavailable5xxTtlSeconds: normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds
     }
 
-    // 如果前端提供了 unifiedClientId，使用它；否则服务层自动生成
     if (unifiedClientId) {
       createOptions.unifiedClientId = unifiedClientId
     }
@@ -686,6 +740,13 @@ router.put('/claude-accounts/:accountId', authenticateAdmin, async (req, res) =>
     ) {
       return res.status(400).json({ error: 'Priority must be a number between 1 and 100' })
     }
+
+    const { normalized: normalizedTempUnavailablePolicy, error: tempUnavailablePolicyError } =
+      normalizeTempUnavailablePolicyPayload(mappedUpdates, { partial: true })
+    if (tempUnavailablePolicyError) {
+      return res.status(400).json({ error: tempUnavailablePolicyError })
+    }
+    Object.assign(mappedUpdates, normalizedTempUnavailablePolicy)
 
     // 验证accountType的有效性
     if (
@@ -796,7 +857,7 @@ router.post('/claude-accounts/:accountId/update-profile', authenticateAdmin, asy
 
     const profileInfo = await claudeAccountService.fetchAndUpdateAccountProfile(accountId)
 
-    logger.success(`✅ Updated profile for Claude account: ${accountId}`)
+    logger.success(`Updated profile for Claude account: ${accountId}`)
     return res.json({
       success: true,
       message: 'Account profile updated successfully',
@@ -815,7 +876,7 @@ router.post('/claude-accounts/update-all-profiles', authenticateAdmin, async (re
   try {
     const result = await claudeAccountService.updateAllAccountProfiles()
 
-    logger.success('✅ Batch profile update completed')
+    logger.success('Batch profile update completed')
     return res.json({
       success: true,
       message: 'Batch profile update completed',
@@ -851,7 +912,7 @@ router.post('/claude-accounts/:accountId/reset-status', authenticateAdmin, async
 
     const result = await claudeAccountService.resetAccountStatus(accountId)
 
-    logger.success(`✅ Admin reset status for Claude account: ${accountId}`)
+    logger.success(`Admin reset status for Claude account: ${accountId}`)
     return res.json({ success: true, data: result })
   } catch (error) {
     logger.error('❌ Failed to reset Claude account status:', error)

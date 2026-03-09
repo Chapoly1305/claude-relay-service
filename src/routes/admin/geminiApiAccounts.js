@@ -1,5 +1,5 @@
 const express = require('express')
-const geminiApiAccountService = require('../../services/geminiApiAccountService')
+const geminiApiAccountService = require('../../services/account/geminiApiAccountService')
 const apiKeyService = require('../../services/apiKeyService')
 const accountGroupService = require('../../services/accountGroupService')
 const redis = require('../../models/redis')
@@ -31,53 +31,108 @@ router.get('/gemini-api-accounts', authenticateAdmin, async (req, res) => {
       }
     }
 
-    // 处理使用统计和绑定的 API Key 数量
-    const accountsWithStats = await Promise.all(
-      accounts.map(async (account) => {
-        // 检查并清除过期的限流状态
-        await geminiApiAccountService.checkAndClearRateLimit(account.id)
+    const accountIds = accounts.map((a) => a.id)
 
-        // 获取使用统计信息
-        let usageStats
-        try {
-          usageStats = await redis.getAccountUsageStats(account.id, 'gemini-api')
-        } catch (error) {
-          logger.debug(`Failed to get usage stats for Gemini-API account ${account.id}:`, error)
-          usageStats = {
-            daily: { requests: 0, tokens: 0, allTokens: 0 },
-            total: { requests: 0, tokens: 0, allTokens: 0 },
-            monthly: { requests: 0, tokens: 0, allTokens: 0 }
-          }
-        }
+    // 并行获取：轻量 API Keys + 分组信息 + daily cost + 清除限流状态
+    const [allApiKeys, allGroupInfosMap, dailyCostMap] = await Promise.all([
+      apiKeyService.getAllApiKeysLite(),
+      accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'gemini'),
+      redis.batchGetAccountDailyCost(accountIds),
+      // 批量清除限流状态
+      Promise.all(accountIds.map((id) => geminiApiAccountService.checkAndClearRateLimit(id)))
+    ])
 
-        // 计算绑定的API Key数量（支持 api: 前缀）
-        const allKeys = await redis.getAllApiKeys()
-        let boundCount = 0
+    // 单次遍历构建绑定数映射（只算直连，不算 group）
+    const bindingCountMap = new Map()
+    for (const key of allApiKeys) {
+      const binding = key.geminiAccountId
+      if (!binding) {
+        continue
+      }
+      // 处理 api: 前缀
+      const accountId = binding.startsWith('api:') ? binding.substring(4) : binding
+      bindingCountMap.set(accountId, (bindingCountMap.get(accountId) || 0) + 1)
+    }
 
-        for (const key of allKeys) {
-          if (key.geminiAccountId) {
-            // 检查是否绑定了此 Gemini-API 账户（支持 api: 前缀）
-            if (key.geminiAccountId === `api:${account.id}`) {
-              boundCount++
-            }
-          }
-        }
+    // 批量获取使用统计
+    const client = redis.getClientSafe()
+    const today = redis.getDateStringInTimezone()
+    const tzDate = redis.getDateInTimezone()
+    const currentMonth = `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(2, '0')}`
 
-        // 获取分组信息
-        const groupInfos = await accountGroupService.getAccountGroups(account.id)
+    const statsPipeline = client.pipeline()
+    for (const accountId of accountIds) {
+      statsPipeline.hgetall(`account_usage:${accountId}`)
+      statsPipeline.hgetall(`account_usage:daily:${accountId}:${today}`)
+      statsPipeline.hgetall(`account_usage:monthly:${accountId}:${currentMonth}`)
+    }
+    const statsResults = await statsPipeline.exec()
 
-        return {
-          ...account,
-          groupInfos,
-          usage: {
-            daily: usageStats.daily,
-            total: usageStats.total,
-            averages: usageStats.averages || usageStats.monthly
-          },
-          boundApiKeys: boundCount
-        }
+    // 处理统计数据
+    const allUsageStatsMap = new Map()
+    for (let i = 0; i < accountIds.length; i++) {
+      const accountId = accountIds[i]
+      const [errTotal, total] = statsResults[i * 3]
+      const [errDaily, daily] = statsResults[i * 3 + 1]
+      const [errMonthly, monthly] = statsResults[i * 3 + 2]
+
+      const parseUsage = (data) => ({
+        requests: parseInt(data?.totalRequests || data?.requests) || 0,
+        tokens: parseInt(data?.totalTokens || data?.tokens) || 0,
+        inputTokens: parseInt(data?.totalInputTokens || data?.inputTokens) || 0,
+        outputTokens: parseInt(data?.totalOutputTokens || data?.outputTokens) || 0,
+        cacheCreateTokens: parseInt(data?.totalCacheCreateTokens || data?.cacheCreateTokens) || 0,
+        cacheReadTokens: parseInt(data?.totalCacheReadTokens || data?.cacheReadTokens) || 0,
+        allTokens:
+          parseInt(data?.totalAllTokens || data?.allTokens) ||
+          (parseInt(data?.totalInputTokens || data?.inputTokens) || 0) +
+            (parseInt(data?.totalOutputTokens || data?.outputTokens) || 0) +
+            (parseInt(data?.totalCacheCreateTokens || data?.cacheCreateTokens) || 0) +
+            (parseInt(data?.totalCacheReadTokens || data?.cacheReadTokens) || 0)
       })
-    )
+
+      allUsageStatsMap.set(accountId, {
+        total: errTotal ? {} : parseUsage(total),
+        daily: errDaily ? {} : parseUsage(daily),
+        monthly: errMonthly ? {} : parseUsage(monthly)
+      })
+    }
+
+    // 处理账户数据
+    const accountsWithStats = accounts.map((account) => {
+      const groupInfos = allGroupInfosMap.get(account.id) || []
+      const usageStats = allUsageStatsMap.get(account.id) || {
+        daily: { requests: 0, tokens: 0, allTokens: 0 },
+        total: { requests: 0, tokens: 0, allTokens: 0 },
+        monthly: { requests: 0, tokens: 0, allTokens: 0 }
+      }
+      const dailyCost = dailyCostMap.get(account.id) || 0
+      const boundCount = bindingCountMap.get(account.id) || 0
+
+      // 计算 averages（rpm/tpm）
+      const createdAt = account.createdAt ? new Date(account.createdAt) : new Date()
+      const daysSinceCreated = Math.max(
+        1,
+        Math.ceil((Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24))
+      )
+      const totalMinutes = daysSinceCreated * 24 * 60
+      const totalRequests = usageStats.total.requests || 0
+      const totalTokens = usageStats.total.tokens || usageStats.total.allTokens || 0
+
+      return {
+        ...account,
+        groupInfos,
+        usage: {
+          daily: { ...usageStats.daily, cost: dailyCost },
+          total: usageStats.total,
+          averages: {
+            rpm: Math.round((totalRequests / totalMinutes) * 100) / 100,
+            tpm: Math.round((totalTokens / totalMinutes) * 100) / 100
+          }
+        },
+        boundApiKeys: boundCount
+      }
+    })
 
     res.json({ success: true, data: accountsWithStats })
   } catch (error) {
@@ -275,7 +330,7 @@ router.delete('/gemini-api-accounts/:id', authenticateAdmin, async (req, res) =>
       message += `，${unboundCount} 个 API Key 已切换为共享池模式`
     }
 
-    logger.success(`✅ ${message}`)
+    logger.success(`${message}`)
 
     res.json({
       success: true,
@@ -389,11 +444,171 @@ router.post('/gemini-api-accounts/:id/reset-status', authenticateAdmin, async (r
 
     const result = await geminiApiAccountService.resetAccountStatus(id)
 
-    logger.success(`✅ Admin reset status for Gemini-API account: ${id}`)
+    logger.success(`Admin reset status for Gemini-API account: ${id}`)
     return res.json({ success: true, data: result })
   } catch (error) {
     logger.error('❌ Failed to reset Gemini-API account status:', error)
     return res.status(500).json({ error: 'Failed to reset status', message: error.message })
+  }
+})
+
+// 测试 Gemini-API 账户连通性（SSE 流式）
+const ALLOWED_MAX_TOKENS = [100, 500, 1000, 2000, 4096]
+const sanitizeMaxTokens = (value) =>
+  ALLOWED_MAX_TOKENS.includes(Number(value)) ? Number(value) : 500
+
+router.post('/gemini-api-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+  const { model = 'gemini-2.5-flash', prompt = 'hi' } = req.body
+  const maxTokens = sanitizeMaxTokens(req.body.maxTokens)
+  const { createGeminiTestPayload, extractErrorMessage } = require('../../utils/testPayloadHelper')
+  const { buildGeminiApiUrl } = require('../../handlers/geminiHandlers')
+  const ProxyHelper = require('../../utils/proxyHelper')
+  const axios = require('axios')
+
+  const abortController = new AbortController()
+  res.on('close', () => abortController.abort())
+
+  const safeWrite = (data) => {
+    if (!res.writableEnded && !res.destroyed) {
+      res.write(data)
+    }
+  }
+  const safeEnd = () => {
+    if (!res.writableEnded && !res.destroyed) {
+      res.end()
+    }
+  }
+
+  try {
+    const account = await geminiApiAccountService.getAccount(accountId)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    if (!account.apiKey) {
+      return res.status(401).json({ error: 'API Key not found or decryption failed' })
+    }
+
+    const baseUrl = account.baseUrl || 'https://generativelanguage.googleapis.com'
+    const apiUrl = buildGeminiApiUrl(baseUrl, model, 'streamGenerateContent', account.apiKey, {
+      stream: true
+    })
+
+    // 设置 SSE 响应头
+    if (res.writableEnded || res.destroyed) {
+      return
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    })
+    safeWrite(`data: ${JSON.stringify({ type: 'test_start', message: 'Test started' })}\n\n`)
+
+    const payload = createGeminiTestPayload(model, { prompt, maxTokens })
+    const requestConfig = {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 60000,
+      responseType: 'stream',
+      validateStatus: () => true,
+      signal: abortController.signal
+    }
+
+    // 配置代理
+    if (account.proxy) {
+      const agent = ProxyHelper.createProxyAgent(account.proxy)
+      if (agent) {
+        requestConfig.httpsAgent = agent
+        requestConfig.httpAgent = agent
+      }
+    }
+
+    try {
+      const response = await axios.post(apiUrl, payload, requestConfig)
+
+      if (response.status !== 200) {
+        const chunks = []
+        response.data.on('data', (chunk) => chunks.push(chunk))
+        response.data.on('end', () => {
+          const errorData = Buffer.concat(chunks).toString()
+          let errorMsg = `API Error: ${response.status}`
+          try {
+            const json = JSON.parse(errorData)
+            errorMsg = extractErrorMessage(json, errorMsg)
+          } catch {
+            if (errorData.length < 500) {
+              errorMsg = errorData || errorMsg
+            }
+          }
+          safeWrite(
+            `data: ${JSON.stringify({ type: 'test_complete', success: false, error: errorMsg })}\n\n`
+          )
+          safeEnd()
+        })
+        response.data.on('error', () => {
+          safeWrite(
+            `data: ${JSON.stringify({ type: 'test_complete', success: false, error: `API Error: ${response.status}` })}\n\n`
+          )
+          safeEnd()
+        })
+        return
+      }
+
+      let buffer = ''
+      response.data.on('data', (chunk) => {
+        buffer += chunk.toString()
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) {
+            continue
+          }
+          const jsonStr = line.substring(5).trim()
+          if (!jsonStr || jsonStr === '[DONE]') {
+            continue
+          }
+
+          try {
+            const data = JSON.parse(jsonStr)
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+            if (text) {
+              safeWrite(`data: ${JSON.stringify({ type: 'content', text })}\n\n`)
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      })
+
+      response.data.on('end', () => {
+        safeWrite(`data: ${JSON.stringify({ type: 'test_complete', success: true })}\n\n`)
+        safeEnd()
+      })
+
+      response.data.on('error', (err) => {
+        safeWrite(
+          `data: ${JSON.stringify({ type: 'test_complete', success: false, error: err.message })}\n\n`
+        )
+        safeEnd()
+      })
+    } catch (axiosError) {
+      if (axiosError.name === 'CanceledError') {
+        return
+      }
+      safeWrite(
+        `data: ${JSON.stringify({ type: 'test_complete', success: false, error: axiosError.message })}\n\n`
+      )
+      safeEnd()
+    }
+  } catch (error) {
+    logger.error('Gemini-API account test failed:', error)
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Test failed', message: error.message })
+    }
+    safeWrite(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`)
+    safeEnd()
   }
 })
 

@@ -50,6 +50,82 @@ function getWeekStringInTimezone(date = new Date()) {
   return `${year}-W${String(weekNumber).padStart(2, '0')}`
 }
 
+// 获取基于自定义重置日/时的周期标识符 (YYYY-MM-DDThh 格式)
+// resetDay: 1-7 (周一到周日)，默认 1 (周一)
+// resetHour: 0-23，默认 0 (00:00)
+function getPeriodString(resetDay = 1, resetHour = 0, date = new Date()) {
+  const tzDate = getDateInTimezone(date)
+
+  // 当前时区时间的 ISO 星期几 (1=周一 ... 7=周日)
+  const currentDay = tzDate.getUTCDay() || 7
+  const currentHour = tzDate.getUTCHours()
+
+  // 计算距上次重置已过的天数
+  let daysSinceReset = (currentDay - resetDay + 7) % 7
+  // 如果同一天但还没到重置时间，视为上一个周期
+  if (daysSinceReset === 0 && currentHour < resetHour) {
+    daysSinceReset = 7
+  }
+
+  // 回退到周期起始日
+  const periodStart = new Date(tzDate)
+  periodStart.setUTCDate(tzDate.getUTCDate() - daysSinceReset)
+  periodStart.setUTCHours(resetHour, 0, 0, 0)
+
+  const y = periodStart.getUTCFullYear()
+  const m = String(periodStart.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(periodStart.getUTCDate()).padStart(2, '0')
+  const h = String(periodStart.getUTCHours()).padStart(2, '0')
+
+  return `${y}-${m}-${d}T${h}`
+}
+
+// 获取下次重置的真实 UTC 时间（用于 402 响应中的 resetAt）
+// resetDay: 1-7 (周一到周日)，默认 1 (周一)
+// resetHour: 0-23，默认 0 (00:00)
+function getNextResetTime(resetDay = 1, resetHour = 0) {
+  const offset = config.system.timezoneOffset || 8
+  const tzDate = getDateInTimezone(new Date())
+
+  const currentDay = tzDate.getUTCDay() || 7
+  const currentHour = tzDate.getUTCHours()
+
+  let daysUntilReset = (resetDay - currentDay + 7) % 7
+  // 如果同一天但已过重置时间，等到下周
+  if (daysUntilReset === 0 && currentHour >= resetHour) {
+    daysUntilReset = 7
+  }
+
+  // 构造时区下的重置时间
+  const resetTz = new Date(tzDate)
+  resetTz.setUTCDate(tzDate.getUTCDate() + daysUntilReset)
+  resetTz.setUTCHours(resetHour, 0, 0, 0)
+
+  // 转换回真实 UTC：减去时区偏移
+  const resetUtc = new Date(resetTz.getTime() - offset * 3600000)
+  return resetUtc
+}
+
+// 获取周期起始日期的 Date 对象（时区下），用于回填时判断日期是否在当前周期内
+// 返回 getDateInTimezone 风格的 Date，可用 getUTC* 获取时区本地值
+function getPeriodStartDate(resetDay = 1, resetHour = 0, date = new Date()) {
+  const tzDate = getDateInTimezone(date)
+
+  const currentDay = tzDate.getUTCDay() || 7
+  const currentHour = tzDate.getUTCHours()
+
+  let daysSinceReset = (currentDay - resetDay + 7) % 7
+  if (daysSinceReset === 0 && currentHour < resetHour) {
+    daysSinceReset = 7
+  }
+
+  const periodStart = new Date(tzDate)
+  periodStart.setUTCDate(tzDate.getUTCDate() - daysSinceReset)
+  periodStart.setUTCHours(resetHour, 0, 0, 0)
+
+  return periodStart
+}
+
 // 并发队列相关常量
 const QUEUE_STATS_TTL_SECONDS = 86400 * 7 // 统计计数保留 7 天
 const WAIT_TIME_TTL_SECONDS = 86400 // 等待时间样本保留 1 天（滚动窗口，无需长期保留）
@@ -122,6 +198,273 @@ class RedisClient {
     }
   }
 
+  // 🔄 自动迁移 usage 索引（启动时调用）
+  async migrateUsageIndex() {
+    const migrationKey = 'system:migration:usage_index_v2' // v2: 添加 keymodel 迁移
+    const migrated = await this.client.get(migrationKey)
+    if (migrated) {
+      logger.debug('📊 Usage index migration already completed')
+      return
+    }
+
+    logger.info('📊 Starting usage index migration...')
+    const stats = { daily: 0, hourly: 0, modelDaily: 0, modelHourly: 0 }
+
+    try {
+      // 迁移 usage:daily
+      let cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:daily:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          const match = key.match(/^usage:daily:([^:]+):(\d{4}-\d{2}-\d{2})$/)
+          if (match) {
+            pipeline.sadd(`usage:daily:index:${match[2]}`, match[1])
+            pipeline.expire(`usage:daily:index:${match[2]}`, 86400 * 32)
+            stats.daily++
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 迁移 usage:hourly
+      cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:hourly:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          const match = key.match(/^usage:hourly:([^:]+):(\d{4}-\d{2}-\d{2}:\d{2})$/)
+          if (match) {
+            pipeline.sadd(`usage:hourly:index:${match[2]}`, match[1])
+            pipeline.expire(`usage:hourly:index:${match[2]}`, 86400 * 7)
+            stats.hourly++
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 迁移 usage:model:daily
+      cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:model:daily:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          const match = key.match(/^usage:model:daily:([^:]+):(\d{4}-\d{2}-\d{2})$/)
+          if (match) {
+            pipeline.sadd(`usage:model:daily:index:${match[2]}`, match[1])
+            pipeline.expire(`usage:model:daily:index:${match[2]}`, 86400 * 32)
+            stats.modelDaily++
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 迁移 usage:model:hourly
+      cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:model:hourly:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          const match = key.match(/^usage:model:hourly:([^:]+):(\d{4}-\d{2}-\d{2}:\d{2})$/)
+          if (match) {
+            pipeline.sadd(`usage:model:hourly:index:${match[2]}`, match[1])
+            pipeline.expire(`usage:model:hourly:index:${match[2]}`, 86400 * 7)
+            stats.modelHourly++
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 迁移 usage:keymodel:daily (usage:{keyId}:model:daily:{model}:{date})
+      cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:*:model:daily:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          // usage:{keyId}:model:daily:{model}:{date}
+          const match = key.match(/^usage:([^:]+):model:daily:(.+):(\d{4}-\d{2}-\d{2})$/)
+          if (match) {
+            const [, keyId, model, date] = match
+            pipeline.sadd(`usage:keymodel:daily:index:${date}`, `${keyId}:${model}`)
+            pipeline.expire(`usage:keymodel:daily:index:${date}`, 86400 * 32)
+            stats.keymodelDaily = (stats.keymodelDaily || 0) + 1
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 迁移 usage:keymodel:hourly (usage:{keyId}:model:hourly:{model}:{hour})
+      cursor = '0'
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:*:model:hourly:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+        const pipeline = this.client.pipeline()
+        for (const key of keys) {
+          // usage:{keyId}:model:hourly:{model}:{hour}
+          const match = key.match(/^usage:([^:]+):model:hourly:(.+):(\d{4}-\d{2}-\d{2}:\d{2})$/)
+          if (match) {
+            const [, keyId, model, hour] = match
+            pipeline.sadd(`usage:keymodel:hourly:index:${hour}`, `${keyId}:${model}`)
+            pipeline.expire(`usage:keymodel:hourly:index:${hour}`, 86400 * 7)
+            stats.keymodelHourly = (stats.keymodelHourly || 0) + 1
+          }
+        }
+        if (keys.length > 0) {
+          await pipeline.exec()
+        }
+      } while (cursor !== '0')
+
+      // 标记迁移完成
+      await this.client.set(migrationKey, Date.now().toString())
+      logger.info(
+        `📊 Usage index migration completed: daily=${stats.daily}, hourly=${stats.hourly}, modelDaily=${stats.modelDaily}, modelHourly=${stats.modelHourly}, keymodelDaily=${stats.keymodelDaily || 0}, keymodelHourly=${stats.keymodelHourly || 0}`
+      )
+    } catch (error) {
+      logger.error('📊 Usage index migration failed:', error)
+    }
+  }
+
+  // 🔄 自动迁移 alltime 模型统计（启动时调用）
+  async migrateAlltimeModelStats() {
+    const migrationKey = 'system:migration:alltime_model_stats_v1'
+    const migrated = await this.client.get(migrationKey)
+    if (migrated) {
+      logger.debug('📊 Alltime model stats migration already completed')
+      return
+    }
+
+    logger.info('📊 Starting alltime model stats migration...')
+    const stats = { keys: 0, models: 0 }
+
+    try {
+      // 扫描所有月度模型统计数据并聚合到 alltime
+      // 格式: usage:{keyId}:model:monthly:{model}:{month}
+      let cursor = '0'
+      const aggregatedData = new Map() // keyId:model -> {inputTokens, outputTokens, ...}
+
+      do {
+        const [newCursor, keys] = await this.client.scan(
+          cursor,
+          'MATCH',
+          'usage:*:model:monthly:*:*',
+          'COUNT',
+          500
+        )
+        cursor = newCursor
+
+        for (const key of keys) {
+          // usage:{keyId}:model:monthly:{model}:{month}
+          const match = key.match(/^usage:([^:]+):model:monthly:(.+):(\d{4}-\d{2})$/)
+          if (match) {
+            const [, keyId, model] = match
+            const aggregateKey = `${keyId}:${model}`
+
+            // 获取该月的数据
+            const data = await this.client.hgetall(key)
+            if (data && Object.keys(data).length > 0) {
+              if (!aggregatedData.has(aggregateKey)) {
+                aggregatedData.set(aggregateKey, {
+                  keyId,
+                  model,
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  cacheCreateTokens: 0,
+                  cacheReadTokens: 0,
+                  requests: 0
+                })
+              }
+
+              const agg = aggregatedData.get(aggregateKey)
+              agg.inputTokens += parseInt(data.inputTokens) || 0
+              agg.outputTokens += parseInt(data.outputTokens) || 0
+              agg.cacheCreateTokens += parseInt(data.cacheCreateTokens) || 0
+              agg.cacheReadTokens += parseInt(data.cacheReadTokens) || 0
+              agg.requests += parseInt(data.requests) || 0
+              stats.keys++
+            }
+          }
+        }
+      } while (cursor !== '0')
+
+      // 写入聚合后的 alltime 数据
+      const pipeline = this.client.pipeline()
+      for (const [, agg] of aggregatedData) {
+        const alltimeKey = `usage:${agg.keyId}:model:alltime:${agg.model}`
+        pipeline.hset(alltimeKey, {
+          inputTokens: agg.inputTokens.toString(),
+          outputTokens: agg.outputTokens.toString(),
+          cacheCreateTokens: agg.cacheCreateTokens.toString(),
+          cacheReadTokens: agg.cacheReadTokens.toString(),
+          requests: agg.requests.toString()
+        })
+        stats.models++
+      }
+
+      if (stats.models > 0) {
+        await pipeline.exec()
+      }
+
+      // 标记迁移完成
+      await this.client.set(migrationKey, Date.now().toString())
+      logger.info(
+        `📊 Alltime model stats migration completed: scanned ${stats.keys} monthly keys, created ${stats.models} alltime keys`
+      )
+    } catch (error) {
+      logger.error('📊 Alltime model stats migration failed:', error)
+    }
+  }
+
   async disconnect() {
     if (this.client) {
       await this.client.quit()
@@ -180,15 +523,18 @@ class RedisClient {
   }
 
   async getAllApiKeys() {
-    const keys = await this.client.keys('apikey:*')
+    const keys = await this.scanKeys('apikey:*')
     const apiKeys = []
-    for (const key of keys) {
+    const dataList = await this.batchHgetallChunked(keys)
+
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]
       // 过滤掉hash_map，它不是真正的API Key
       if (key === 'apikey:hash_map') {
         continue
       }
 
-      const keyData = await this.client.hgetall(key)
+      const keyData = dataList[i]
       if (keyData && Object.keys(keyData).length > 0) {
         apiKeys.push({ id: key.replace('apikey:', ''), ...keyData })
       }
@@ -198,24 +544,192 @@ class RedisClient {
 
   /**
    * 使用 SCAN 获取所有 API Key ID（避免 KEYS 命令阻塞）
-   * @returns {Promise<string[]>} API Key ID 列表
+   * @returns {Promise<string[]>} API Key ID 列表（已去重）
    */
   async scanApiKeyIds() {
-    const keyIds = []
+    const keyIds = new Set()
     let cursor = '0'
+    // 排除索引 key 的前缀
+    const excludePrefixes = [
+      'apikey:hash_map',
+      'apikey:idx:',
+      'apikey:set:',
+      'apikey:tags:',
+      'apikey:index:'
+    ]
 
     do {
       const [newCursor, keys] = await this.client.scan(cursor, 'MATCH', 'apikey:*', 'COUNT', 100)
       cursor = newCursor
 
       for (const key of keys) {
-        if (key !== 'apikey:hash_map') {
-          keyIds.push(key.replace('apikey:', ''))
+        // 只接受 apikey:<uuid> 形态，排除索引 key
+        if (excludePrefixes.some((prefix) => key.startsWith(prefix))) {
+          continue
+        }
+        // 确保是 apikey:<id> 格式（只有一个冒号）
+        if (key.split(':').length !== 2) {
+          continue
+        }
+        keyIds.add(key.replace('apikey:', ''))
+      }
+    } while (cursor !== '0')
+
+    return [...keyIds]
+  }
+
+  // 添加标签到全局标签集合
+  async addTag(tagName) {
+    await this.client.sadd('apikey:tags:all', tagName)
+  }
+
+  // 从全局标签集合删除标签
+  async removeTag(tagName) {
+    await this.client.srem('apikey:tags:all', tagName)
+  }
+
+  // 获取全局标签集合
+  async getGlobalTags() {
+    return await this.client.smembers('apikey:tags:all')
+  }
+
+  /**
+   * 使用索引获取所有 API Key 的标签（优化版本）
+   * 优先级：索引就绪时用 apikey:tags:all > apikey:idx:all + pipeline > SCAN
+   * @returns {Promise<string[]>} 去重排序后的标签列表
+   */
+  async scanAllApiKeyTags() {
+    // 检查索引是否就绪（非重建中且版本号正确）
+    const isIndexReady = await this._checkIndexReady()
+
+    if (isIndexReady) {
+      // 方案1：直接读取索引服务维护的标签集合
+      const cachedTags = await this.client.smembers('apikey:tags:all')
+      if (cachedTags && cachedTags.length > 0) {
+        // 保持 trim 一致性
+        return cachedTags
+          .map((t) => (t ? t.trim() : ''))
+          .filter((t) => t)
+          .sort()
+      }
+
+      // 方案2：使用索引的 key ID 列表 + pipeline
+      const indexedKeyIds = await this.client.smembers('apikey:idx:all')
+      if (indexedKeyIds && indexedKeyIds.length > 0) {
+        return this._extractTagsFromKeyIds(indexedKeyIds)
+      }
+    }
+
+    // 方案3：回退到 SCAN（索引未就绪或重建中）
+    return this._scanTagsFallback()
+  }
+
+  /**
+   * 检查索引是否就绪
+   */
+  async _checkIndexReady() {
+    try {
+      const version = await this.client.get('apikey:index:version')
+      // 版本号 >= 2 表示索引就绪
+      return parseInt(version) >= 2
+    } catch {
+      return false
+    }
+  }
+
+  async _extractTagsFromKeyIds(keyIds) {
+    const tagSet = new Set()
+    const pipeline = this.client.pipeline()
+    for (const keyId of keyIds) {
+      pipeline.hmget(`apikey:${keyId}`, 'tags', 'isDeleted')
+    }
+
+    const results = await pipeline.exec()
+    if (!results) {
+      return []
+    }
+
+    for (const result of results) {
+      if (!result) {
+        continue
+      }
+      const [err, values] = result
+      if (err || !values) {
+        continue
+      }
+      const [tags, isDeleted] = values
+      if (isDeleted === 'true' || !tags) {
+        continue
+      }
+
+      try {
+        const parsed = JSON.parse(tags)
+        if (Array.isArray(parsed)) {
+          for (const tag of parsed) {
+            if (tag && typeof tag === 'string' && tag.trim()) {
+              tagSet.add(tag.trim())
+            }
+          }
+        }
+      } catch {
+        // 忽略解析错误
+      }
+    }
+    return Array.from(tagSet).sort()
+  }
+
+  async _scanTagsFallback() {
+    const tagSet = new Set()
+    let cursor = '0'
+
+    do {
+      const [newCursor, keys] = await this.client.scan(cursor, 'MATCH', 'apikey:*', 'COUNT', 100)
+      cursor = newCursor
+
+      const validKeys = keys.filter((k) => k !== 'apikey:hash_map' && k.split(':').length === 2)
+      if (validKeys.length === 0) {
+        continue
+      }
+
+      const pipeline = this.client.pipeline()
+      for (const key of validKeys) {
+        pipeline.hmget(key, 'tags', 'isDeleted')
+      }
+
+      const results = await pipeline.exec()
+      if (!results) {
+        continue
+      }
+
+      for (const result of results) {
+        if (!result) {
+          continue
+        }
+        const [err, values] = result
+        if (err || !values) {
+          continue
+        }
+        const [tags, isDeleted] = values
+        if (isDeleted === 'true' || !tags) {
+          continue
+        }
+
+        try {
+          const parsed = JSON.parse(tags)
+          if (Array.isArray(parsed)) {
+            for (const tag of parsed) {
+              if (tag && typeof tag === 'string' && tag.trim()) {
+                tagSet.add(tag.trim())
+              }
+            }
+          }
+        } catch {
+          // 忽略解析错误
         }
       }
     } while (cursor !== '0')
 
-    return keyIds
+    return Array.from(tagSet).sort()
   }
 
   /**
@@ -259,7 +773,7 @@ class RedisClient {
     const parsed = { ...data }
 
     // 布尔字段
-    const boolFields = ['isActive', 'enableModelRestriction', 'isDeleted']
+    const boolFields = ['isActive', 'enableModelRestriction', 'isDeleted', 'allow1mContext']
     for (const field of boolFields) {
       if (parsed[field] !== undefined) {
         parsed[field] = parsed[field] === 'true'
@@ -296,6 +810,18 @@ class RedisClient {
       }
     }
 
+    // 对象字段（JSON 解析）
+    const objectFields = ['serviceRates']
+    for (const field of objectFields) {
+      if (parsed[field]) {
+        try {
+          parsed[field] = JSON.parse(parsed[field])
+        } catch (e) {
+          parsed[field] = {}
+        }
+      }
+    }
+
     return parsed
   }
 
@@ -318,7 +844,40 @@ class RedisClient {
       modelFilter = []
     } = options
 
-    // 1. 使用 SCAN 获取所有 apikey:* 的 ID 列表（避免阻塞）
+    // 尝试使用索引查询（性能优化）
+    const apiKeyIndexService = require('../services/apiKeyIndexService')
+    const indexReady = await apiKeyIndexService.isIndexReady()
+
+    // 索引路径支持的条件：
+    // - 无模型筛选（需要查询使用记录）
+    // - 非 bindingAccount 搜索模式（索引不支持）
+    // - 非 status/expiresAt 排序（索引不支持）
+    // - 无搜索关键词（索引只搜 name，旧逻辑搜 name+owner，不一致）
+    const canUseIndex =
+      indexReady &&
+      modelFilter.length === 0 &&
+      searchMode !== 'bindingAccount' &&
+      !['status', 'expiresAt'].includes(sortBy) &&
+      !search
+
+    if (canUseIndex) {
+      // 使用索引查询
+      try {
+        return await apiKeyIndexService.queryWithIndex({
+          page,
+          pageSize,
+          sortBy,
+          sortOrder,
+          isActive: isActive === '' ? undefined : isActive === 'true' || isActive === true,
+          tag,
+          excludeDeleted
+        })
+      } catch (error) {
+        logger.warn('⚠️ 索引查询失败，降级到全量扫描:', error.message)
+      }
+    }
+
+    // 降级：使用 SCAN 获取所有 apikey:* 的 ID 列表（避免阻塞）
     const keyIds = await this.scanApiKeyIds()
 
     // 2. 使用 Pipeline 批量获取基础数据
@@ -436,7 +995,18 @@ class RedisClient {
   // 🔍 通过哈希值查找API Key（性能优化）
   async findApiKeyByHash(hashedKey) {
     // 使用反向映射表：hash -> keyId
-    const keyId = await this.client.hget('apikey:hash_map', hashedKey)
+    let keyId = await this.client.hget('apikey:hash_map', hashedKey)
+
+    // 回退：查旧结构 apikey_hash:*（启动回填未完成时兼容）
+    if (!keyId) {
+      const oldData = await this.client.hgetall(`apikey_hash:${hashedKey}`)
+      if (oldData && oldData.id) {
+        keyId = oldData.id
+        // 回填到 hash_map
+        await this.client.hset('apikey:hash_map', hashedKey, keyId)
+      }
+    }
+
     if (!keyId) {
       return null
     }
@@ -482,7 +1052,9 @@ class RedisClient {
     model = 'unknown',
     ephemeral5mTokens = 0, // 新增：5分钟缓存 tokens
     ephemeral1hTokens = 0, // 新增：1小时缓存 tokens
-    isLongContextRequest = false // 新增：是否为 1M 上下文请求（超过200k）
+    isLongContextRequest = false, // 新增：是否为 1M 上下文请求（超过200k）
+    realCost = 0, // 真实费用（官方API费用）
+    ratedCost = 0 // 计费费用（应用倍率后）
   ) {
     const key = `usage:${keyId}`
     const now = new Date()
@@ -588,6 +1160,9 @@ class RedisClient {
     pipeline.hincrby(modelDaily, 'cacheReadTokens', finalCacheReadTokens)
     pipeline.hincrby(modelDaily, 'allTokens', totalTokens)
     pipeline.hincrby(modelDaily, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(modelDaily, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(modelDaily, 'ephemeral1hTokens', ephemeral1hTokens)
 
     // 按模型统计 - 每月
     pipeline.hincrby(modelMonthly, 'inputTokens', finalInputTokens)
@@ -596,6 +1171,9 @@ class RedisClient {
     pipeline.hincrby(modelMonthly, 'cacheReadTokens', finalCacheReadTokens)
     pipeline.hincrby(modelMonthly, 'allTokens', totalTokens)
     pipeline.hincrby(modelMonthly, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(modelMonthly, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(modelMonthly, 'ephemeral1hTokens', ephemeral1hTokens)
 
     // API Key级别的模型统计 - 每日
     pipeline.hincrby(keyModelDaily, 'inputTokens', finalInputTokens)
@@ -607,6 +1185,13 @@ class RedisClient {
     // 详细缓存类型统计
     pipeline.hincrby(keyModelDaily, 'ephemeral5mTokens', ephemeral5mTokens)
     pipeline.hincrby(keyModelDaily, 'ephemeral1hTokens', ephemeral1hTokens)
+    // 费用统计（使用整数存储，单位：微美元，1美元=1000000微美元）
+    if (realCost > 0) {
+      pipeline.hincrby(keyModelDaily, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (ratedCost > 0) {
+      pipeline.hincrby(keyModelDaily, 'ratedCostMicro', Math.round(ratedCost * 1000000))
+    }
 
     // API Key级别的模型统计 - 每月
     pipeline.hincrby(keyModelMonthly, 'inputTokens', finalInputTokens)
@@ -618,6 +1203,31 @@ class RedisClient {
     // 详细缓存类型统计
     pipeline.hincrby(keyModelMonthly, 'ephemeral5mTokens', ephemeral5mTokens)
     pipeline.hincrby(keyModelMonthly, 'ephemeral1hTokens', ephemeral1hTokens)
+    // 费用统计
+    if (realCost > 0) {
+      pipeline.hincrby(keyModelMonthly, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (ratedCost > 0) {
+      pipeline.hincrby(keyModelMonthly, 'ratedCostMicro', Math.round(ratedCost * 1000000))
+    }
+
+    // API Key级别的模型统计 - 所有时间（无 TTL）
+    const keyModelAlltime = `usage:${keyId}:model:alltime:${normalizedModel}`
+    pipeline.hincrby(keyModelAlltime, 'inputTokens', finalInputTokens)
+    pipeline.hincrby(keyModelAlltime, 'outputTokens', finalOutputTokens)
+    pipeline.hincrby(keyModelAlltime, 'cacheCreateTokens', finalCacheCreateTokens)
+    pipeline.hincrby(keyModelAlltime, 'cacheReadTokens', finalCacheReadTokens)
+    pipeline.hincrby(keyModelAlltime, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(keyModelAlltime, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(keyModelAlltime, 'ephemeral1hTokens', ephemeral1hTokens)
+    // 费用统计
+    if (realCost > 0) {
+      pipeline.hincrby(keyModelAlltime, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (ratedCost > 0) {
+      pipeline.hincrby(keyModelAlltime, 'ratedCostMicro', Math.round(ratedCost * 1000000))
+    }
 
     // 小时级别统计
     pipeline.hincrby(hourly, 'tokens', coreTokens)
@@ -627,6 +1237,9 @@ class RedisClient {
     pipeline.hincrby(hourly, 'cacheReadTokens', finalCacheReadTokens)
     pipeline.hincrby(hourly, 'allTokens', totalTokens)
     pipeline.hincrby(hourly, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(hourly, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(hourly, 'ephemeral1hTokens', ephemeral1hTokens)
 
     // 按模型统计 - 每小时
     pipeline.hincrby(modelHourly, 'inputTokens', finalInputTokens)
@@ -635,6 +1248,9 @@ class RedisClient {
     pipeline.hincrby(modelHourly, 'cacheReadTokens', finalCacheReadTokens)
     pipeline.hincrby(modelHourly, 'allTokens', totalTokens)
     pipeline.hincrby(modelHourly, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(modelHourly, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(modelHourly, 'ephemeral1hTokens', ephemeral1hTokens)
 
     // API Key级别的模型统计 - 每小时
     pipeline.hincrby(keyModelHourly, 'inputTokens', finalInputTokens)
@@ -643,6 +1259,16 @@ class RedisClient {
     pipeline.hincrby(keyModelHourly, 'cacheReadTokens', finalCacheReadTokens)
     pipeline.hincrby(keyModelHourly, 'allTokens', totalTokens)
     pipeline.hincrby(keyModelHourly, 'requests', 1)
+    // 详细缓存类型统计
+    pipeline.hincrby(keyModelHourly, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(keyModelHourly, 'ephemeral1hTokens', ephemeral1hTokens)
+    // 费用统计
+    if (realCost > 0) {
+      pipeline.hincrby(keyModelHourly, 'realCostMicro', Math.round(realCost * 1000000))
+    }
+    if (ratedCost > 0) {
+      pipeline.hincrby(keyModelHourly, 'ratedCostMicro', Math.round(ratedCost * 1000000))
+    }
 
     // 新增：系统级分钟统计
     pipeline.hincrby(systemMinuteKey, 'requests', 1)
@@ -663,10 +1289,66 @@ class RedisClient {
     pipeline.expire(keyModelMonthly, 86400 * 365) // API Key模型每月统计1年过期
     pipeline.expire(keyModelHourly, 86400 * 7) // API Key模型小时统计7天过期
 
-    // 系统级分钟统计的过期时间（窗口时间的2倍）
+    // 系统级分钟统计的过期时间（窗口时间的2倍，默认5分钟）
     const configLocal = require('../../config/config')
-    const { metricsWindow } = configLocal.system
+    const metricsWindow = configLocal.system?.metricsWindow || 5
     pipeline.expire(systemMinuteKey, metricsWindow * 60 * 2)
+
+    // 添加索引（用于快速查询，避免 SCAN）
+    pipeline.sadd(`usage:daily:index:${today}`, keyId)
+    pipeline.sadd(`usage:hourly:index:${currentHour}`, keyId)
+    pipeline.sadd(`usage:model:daily:index:${today}`, normalizedModel)
+    pipeline.sadd(`usage:model:hourly:index:${currentHour}`, normalizedModel)
+    pipeline.sadd(`usage:model:monthly:index:${currentMonth}`, normalizedModel)
+    pipeline.sadd('usage:model:monthly:months', currentMonth) // 全局月份索引
+    pipeline.sadd(`usage:keymodel:daily:index:${today}`, `${keyId}:${normalizedModel}`)
+    pipeline.sadd(`usage:keymodel:hourly:index:${currentHour}`, `${keyId}:${normalizedModel}`)
+    // 清理空标记（有新数据时）
+    pipeline.del(`usage:daily:index:${today}:empty`)
+    pipeline.del(`usage:hourly:index:${currentHour}:empty`)
+    pipeline.del(`usage:model:daily:index:${today}:empty`)
+    pipeline.del(`usage:model:hourly:index:${currentHour}:empty`)
+    pipeline.del(`usage:model:monthly:index:${currentMonth}:empty`)
+    pipeline.del(`usage:keymodel:daily:index:${today}:empty`)
+    pipeline.del(`usage:keymodel:hourly:index:${currentHour}:empty`)
+    // 索引过期时间
+    pipeline.expire(`usage:daily:index:${today}`, 86400 * 32)
+    pipeline.expire(`usage:hourly:index:${currentHour}`, 86400 * 7)
+    pipeline.expire(`usage:model:daily:index:${today}`, 86400 * 32)
+    pipeline.expire(`usage:model:hourly:index:${currentHour}`, 86400 * 7)
+    pipeline.expire(`usage:model:monthly:index:${currentMonth}`, 86400 * 365)
+    pipeline.expire(`usage:keymodel:daily:index:${today}`, 86400 * 32)
+    pipeline.expire(`usage:keymodel:hourly:index:${currentHour}`, 86400 * 7)
+
+    // 全局预聚合统计
+    const globalDaily = `usage:global:daily:${today}`
+    const globalMonthly = `usage:global:monthly:${currentMonth}`
+    pipeline.hincrby('usage:global:total', 'requests', 1)
+    pipeline.hincrby('usage:global:total', 'inputTokens', finalInputTokens)
+    pipeline.hincrby('usage:global:total', 'outputTokens', finalOutputTokens)
+    pipeline.hincrby('usage:global:total', 'cacheCreateTokens', finalCacheCreateTokens)
+    pipeline.hincrby('usage:global:total', 'cacheReadTokens', finalCacheReadTokens)
+    pipeline.hincrby('usage:global:total', 'allTokens', totalTokens)
+    pipeline.hincrby('usage:global:total', 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby('usage:global:total', 'ephemeral1hTokens', ephemeral1hTokens)
+    pipeline.hincrby(globalDaily, 'requests', 1)
+    pipeline.hincrby(globalDaily, 'inputTokens', finalInputTokens)
+    pipeline.hincrby(globalDaily, 'outputTokens', finalOutputTokens)
+    pipeline.hincrby(globalDaily, 'cacheCreateTokens', finalCacheCreateTokens)
+    pipeline.hincrby(globalDaily, 'cacheReadTokens', finalCacheReadTokens)
+    pipeline.hincrby(globalDaily, 'allTokens', totalTokens)
+    pipeline.hincrby(globalDaily, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(globalDaily, 'ephemeral1hTokens', ephemeral1hTokens)
+    pipeline.hincrby(globalMonthly, 'requests', 1)
+    pipeline.hincrby(globalMonthly, 'inputTokens', finalInputTokens)
+    pipeline.hincrby(globalMonthly, 'outputTokens', finalOutputTokens)
+    pipeline.hincrby(globalMonthly, 'cacheCreateTokens', finalCacheCreateTokens)
+    pipeline.hincrby(globalMonthly, 'cacheReadTokens', finalCacheReadTokens)
+    pipeline.hincrby(globalMonthly, 'allTokens', totalTokens)
+    pipeline.hincrby(globalMonthly, 'ephemeral5mTokens', ephemeral5mTokens)
+    pipeline.hincrby(globalMonthly, 'ephemeral1hTokens', ephemeral1hTokens)
+    pipeline.expire(globalDaily, 86400 * 32)
+    pipeline.expire(globalMonthly, 86400 * 365)
 
     // 执行Pipeline
     await pipeline.exec()
@@ -680,6 +1362,8 @@ class RedisClient {
     outputTokens = 0,
     cacheCreateTokens = 0,
     cacheReadTokens = 0,
+    ephemeral5mTokens = 0,
+    ephemeral1hTokens = 0,
     model = 'unknown',
     isLongContextRequest = false
   ) {
@@ -711,6 +1395,8 @@ class RedisClient {
     const finalOutputTokens = outputTokens || 0
     const finalCacheCreateTokens = cacheCreateTokens || 0
     const finalCacheReadTokens = cacheReadTokens || 0
+    const finalEphemeral5mTokens = ephemeral5mTokens || 0
+    const finalEphemeral1hTokens = ephemeral1hTokens || 0
     const actualTotalTokens =
       finalInputTokens + finalOutputTokens + finalCacheCreateTokens + finalCacheReadTokens
     const coreTokens = finalInputTokens + finalOutputTokens
@@ -723,6 +1409,8 @@ class RedisClient {
       this.client.hincrby(accountKey, 'totalOutputTokens', finalOutputTokens),
       this.client.hincrby(accountKey, 'totalCacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountKey, 'totalCacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountKey, 'totalEphemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountKey, 'totalEphemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountKey, 'totalAllTokens', actualTotalTokens),
       this.client.hincrby(accountKey, 'totalRequests', 1),
 
@@ -732,6 +1420,8 @@ class RedisClient {
       this.client.hincrby(accountDaily, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountDaily, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountDaily, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountDaily, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountDaily, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountDaily, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountDaily, 'requests', 1),
 
@@ -741,6 +1431,8 @@ class RedisClient {
       this.client.hincrby(accountMonthly, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountMonthly, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountMonthly, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountMonthly, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountMonthly, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountMonthly, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountMonthly, 'requests', 1),
 
@@ -750,6 +1442,8 @@ class RedisClient {
       this.client.hincrby(accountHourly, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountHourly, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountHourly, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountHourly, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountHourly, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountHourly, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountHourly, 'requests', 1),
 
@@ -770,6 +1464,16 @@ class RedisClient {
         `model:${normalizedModel}:cacheReadTokens`,
         finalCacheReadTokens
       ),
+      this.client.hincrby(
+        accountHourly,
+        `model:${normalizedModel}:ephemeral5mTokens`,
+        finalEphemeral5mTokens
+      ),
+      this.client.hincrby(
+        accountHourly,
+        `model:${normalizedModel}:ephemeral1hTokens`,
+        finalEphemeral1hTokens
+      ),
       this.client.hincrby(accountHourly, `model:${normalizedModel}:allTokens`, actualTotalTokens),
       this.client.hincrby(accountHourly, `model:${normalizedModel}:requests`, 1),
 
@@ -778,6 +1482,8 @@ class RedisClient {
       this.client.hincrby(accountModelDaily, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountModelDaily, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountModelDaily, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountModelDaily, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountModelDaily, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountModelDaily, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountModelDaily, 'requests', 1),
 
@@ -786,6 +1492,8 @@ class RedisClient {
       this.client.hincrby(accountModelMonthly, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountModelMonthly, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountModelMonthly, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountModelMonthly, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountModelMonthly, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountModelMonthly, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountModelMonthly, 'requests', 1),
 
@@ -794,6 +1502,8 @@ class RedisClient {
       this.client.hincrby(accountModelHourly, 'outputTokens', finalOutputTokens),
       this.client.hincrby(accountModelHourly, 'cacheCreateTokens', finalCacheCreateTokens),
       this.client.hincrby(accountModelHourly, 'cacheReadTokens', finalCacheReadTokens),
+      this.client.hincrby(accountModelHourly, 'ephemeral5mTokens', finalEphemeral5mTokens),
+      this.client.hincrby(accountModelHourly, 'ephemeral1hTokens', finalEphemeral1hTokens),
       this.client.hincrby(accountModelHourly, 'allTokens', actualTotalTokens),
       this.client.hincrby(accountModelHourly, 'requests', 1),
 
@@ -803,7 +1513,29 @@ class RedisClient {
       this.client.expire(accountHourly, 86400 * 7), // 7天过期
       this.client.expire(accountModelDaily, 86400 * 32), // 32天过期
       this.client.expire(accountModelMonthly, 86400 * 365), // 1年过期
-      this.client.expire(accountModelHourly, 86400 * 7) // 7天过期
+      this.client.expire(accountModelHourly, 86400 * 7), // 7天过期
+
+      // 添加索引
+      this.client.sadd(`account_usage:hourly:index:${currentHour}`, accountId),
+      this.client.sadd(
+        `account_usage:model:hourly:index:${currentHour}`,
+        `${accountId}:${normalizedModel}`
+      ),
+      this.client.expire(`account_usage:hourly:index:${currentHour}`, 86400 * 7),
+      this.client.expire(`account_usage:model:hourly:index:${currentHour}`, 86400 * 7),
+      // daily 索引
+      this.client.sadd(`account_usage:daily:index:${today}`, accountId),
+      this.client.sadd(
+        `account_usage:model:daily:index:${today}`,
+        `${accountId}:${normalizedModel}`
+      ),
+      this.client.expire(`account_usage:daily:index:${today}`, 86400 * 32),
+      this.client.expire(`account_usage:model:daily:index:${today}`, 86400 * 32),
+      // 清理空标记
+      this.client.del(`account_usage:hourly:index:${currentHour}:empty`),
+      this.client.del(`account_usage:model:hourly:index:${currentHour}:empty`),
+      this.client.del(`account_usage:daily:index:${today}:empty`),
+      this.client.del(`account_usage:model:daily:index:${today}:empty`)
     ]
 
     // 如果是 1M 上下文请求，添加额外的统计
@@ -823,6 +1555,8 @@ class RedisClient {
 
   /**
    * 获取使用了指定模型的 Key IDs（OR 逻辑）
+   * 使用 EXISTS + pipeline 批量检查 alltime 键，避免 KEYS 全量扫描
+   * 支持分批处理和 fallback 到 SCAN 模式
    */
   async getKeyIdsWithModels(keyIds, models) {
     if (!keyIds.length || !models.length) {
@@ -831,16 +1565,71 @@ class RedisClient {
 
     const client = this.getClientSafe()
     const result = new Set()
+    const BATCH_SIZE = 1000
 
-    // 批量检查每个 keyId 是否使用过任意一个指定模型
+    // 构建所有需要检查的 key
+    const checkKeys = []
+    const keyIdMap = new Map()
+
     for (const keyId of keyIds) {
       for (const model of models) {
-        // 检查是否有该模型的使用记录（daily 或 monthly）
-        const pattern = `usage:${keyId}:model:*:${model}:*`
-        const keys = await client.keys(pattern)
-        if (keys.length > 0) {
-          result.add(keyId)
-          break // 找到一个就够了（OR 逻辑）
+        const key = `usage:${keyId}:model:alltime:${model}`
+        checkKeys.push(key)
+        keyIdMap.set(key, keyId)
+      }
+    }
+
+    // 分批 EXISTS 检查（避免单个 pipeline 过大）
+    for (let i = 0; i < checkKeys.length; i += BATCH_SIZE) {
+      const batch = checkKeys.slice(i, i + BATCH_SIZE)
+      const pipeline = client.pipeline()
+      for (const key of batch) {
+        pipeline.exists(key)
+      }
+      const results = await pipeline.exec()
+
+      for (let j = 0; j < batch.length; j++) {
+        const [err, exists] = results[j]
+        if (!err && exists) {
+          result.add(keyIdMap.get(batch[j]))
+        }
+      }
+    }
+
+    // Fallback: 如果 alltime 键全部不存在，回退到 SCAN 模式
+    if (result.size === 0 && keyIds.length > 0) {
+      // 多抽样检查：抽取最多 3 个 keyId 检查是否有 alltime 数据
+      const sampleIndices = new Set()
+      sampleIndices.add(0) // 始终包含第一个
+      if (keyIds.length > 1) {
+        sampleIndices.add(keyIds.length - 1)
+      } // 包含最后一个
+      if (keyIds.length > 2) {
+        sampleIndices.add(Math.floor(keyIds.length / 2))
+      } // 包含中间一个
+
+      let hasAnyAlltimeData = false
+      for (const idx of sampleIndices) {
+        const samplePattern = `usage:${keyIds[idx]}:model:alltime:*`
+        const sampleKeys = await this.scanKeys(samplePattern)
+        if (sampleKeys.length > 0) {
+          hasAnyAlltimeData = true
+          break
+        }
+      }
+
+      if (!hasAnyAlltimeData) {
+        // alltime 数据不存在，回退到旧扫描逻辑
+        logger.warn('⚠️ alltime 模型数据不存在，回退到 SCAN 模式（建议运行迁移脚本）')
+        for (const keyId of keyIds) {
+          for (const model of models) {
+            const pattern = `usage:${keyId}:model:*:${model}:*`
+            const keys = await this.scanKeys(pattern)
+            if (keys.length > 0) {
+              result.add(keyId)
+              break
+            }
+          }
         }
       }
     }
@@ -1020,8 +1809,10 @@ class RedisClient {
     return result
   }
 
-  // 💰 增加当日费用
-  async incrementDailyCost(keyId, amount) {
+  // 💰 增加当日费用（支持倍率成本和真实成本分开记录）
+  // amount: 倍率后的成本（用于限额校验）
+  // realAmount: 真实成本（用于对账），如果不传则等于 amount
+  async incrementDailyCost(keyId, amount, realAmount = null) {
     const today = getDateStringInTimezone()
     const tzDate = getDateInTimezone()
     const currentMonth = `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(
@@ -1035,25 +1826,33 @@ class RedisClient {
     const hourlyKey = `usage:cost:hourly:${keyId}:${currentHour}`
     const totalKey = `usage:cost:total:${keyId}` // 总费用键 - 永不过期，持续累加
 
+    // 真实成本键（用于对账）
+    const realTotalKey = `usage:cost:real:total:${keyId}`
+    const realDailyKey = `usage:cost:real:daily:${keyId}:${today}`
+    const actualRealAmount = realAmount !== null ? realAmount : amount
+
     logger.debug(
-      `💰 Incrementing cost for ${keyId}, amount: $${amount}, date: ${today}, dailyKey: ${dailyKey}`
+      `💰 Incrementing cost for ${keyId}, rated: $${amount}, real: $${actualRealAmount}, date: ${today}`
     )
 
     const results = await Promise.all([
       this.client.incrbyfloat(dailyKey, amount),
       this.client.incrbyfloat(monthlyKey, amount),
       this.client.incrbyfloat(hourlyKey, amount),
-      this.client.incrbyfloat(totalKey, amount), // ✅ 累加到总费用（永不过期）
-      // 设置过期时间（注意：totalKey 不设置过期时间，保持永久累计）
+      this.client.incrbyfloat(totalKey, amount), // 倍率后总费用（用于限额）
+      this.client.incrbyfloat(realTotalKey, actualRealAmount), // 真实总费用（用于对账）
+      this.client.incrbyfloat(realDailyKey, actualRealAmount), // 真实每日费用
+      // 设置过期时间（注意：totalKey 和 realTotalKey 不设置过期时间，保持永久累计）
       this.client.expire(dailyKey, 86400 * 30), // 30天
       this.client.expire(monthlyKey, 86400 * 90), // 90天
-      this.client.expire(hourlyKey, 86400 * 7) // 7天
+      this.client.expire(hourlyKey, 86400 * 7), // 7天
+      this.client.expire(realDailyKey, 86400 * 30) // 30天
     ])
 
     logger.debug(`💰 Cost incremented successfully, new daily total: $${results[0]}`)
   }
 
-  // 💰 获取费用统计
+  // 💰 获取费用统计（包含倍率成本和真实成本）
   async getCostStats(keyId) {
     const today = getDateStringInTimezone()
     const tzDate = getDateInTimezone()
@@ -1063,79 +1862,108 @@ class RedisClient {
     )}`
     const currentHour = `${today}:${String(getHourInTimezone(new Date())).padStart(2, '0')}`
 
-    const [daily, monthly, hourly, total] = await Promise.all([
+    const [daily, monthly, hourly, total, realTotal, realDaily] = await Promise.all([
       this.client.get(`usage:cost:daily:${keyId}:${today}`),
       this.client.get(`usage:cost:monthly:${keyId}:${currentMonth}`),
       this.client.get(`usage:cost:hourly:${keyId}:${currentHour}`),
-      this.client.get(`usage:cost:total:${keyId}`)
+      this.client.get(`usage:cost:total:${keyId}`),
+      this.client.get(`usage:cost:real:total:${keyId}`),
+      this.client.get(`usage:cost:real:daily:${keyId}:${today}`)
     ])
 
     return {
       daily: parseFloat(daily || 0),
       monthly: parseFloat(monthly || 0),
       hourly: parseFloat(hourly || 0),
-      total: parseFloat(total || 0)
+      total: parseFloat(total || 0),
+      realTotal: parseFloat(realTotal || 0),
+      realDaily: parseFloat(realDaily || 0)
     }
   }
 
-  // 💰 获取本周 Opus 费用
-  async getWeeklyOpusCost(keyId) {
-    const currentWeek = getWeekStringInTimezone()
-    const costKey = `usage:opus:weekly:${keyId}:${currentWeek}`
+  // 💰 获取本周 Opus 费用（支持自定义重置周期）
+  async getWeeklyOpusCost(keyId, resetDay = 1, resetHour = 0) {
+    const periodStr = getPeriodString(resetDay, resetHour)
+    const costKey = `usage:opus:weekly:${keyId}:${periodStr}`
     const cost = await this.client.get(costKey)
     const result = parseFloat(cost || 0)
     logger.debug(
-      `💰 Getting weekly Opus cost for ${keyId}, week: ${currentWeek}, key: ${costKey}, value: ${cost}, result: ${result}`
+      `💰 Getting weekly Opus cost for ${keyId}, period: ${periodStr}, key: ${costKey}, value: ${cost}, result: ${result}`
     )
     return result
   }
 
-  // 💰 增加本周 Opus 费用
-  async incrementWeeklyOpusCost(keyId, amount) {
-    const currentWeek = getWeekStringInTimezone()
-    const weeklyKey = `usage:opus:weekly:${keyId}:${currentWeek}`
+  // 💰 增加本周 Opus 费用（支持倍率成本和真实成本，支持自定义重置周期）
+  // amount: 倍率后的成本（用于限额校验）
+  // realAmount: 真实成本（用于对账），如果不传则等于 amount
+  async incrementWeeklyOpusCost(keyId, amount, realAmount = null, resetDay = 1, resetHour = 0) {
+    const periodStr = getPeriodString(resetDay, resetHour)
+    const weeklyKey = `usage:opus:weekly:${keyId}:${periodStr}`
     const totalKey = `usage:opus:total:${keyId}`
+    const realWeeklyKey = `usage:opus:real:weekly:${keyId}:${periodStr}`
+    const realTotalKey = `usage:opus:real:total:${keyId}`
+    const actualRealAmount = realAmount !== null ? realAmount : amount
 
     logger.debug(
-      `💰 Incrementing weekly Opus cost for ${keyId}, week: ${currentWeek}, amount: $${amount}`
+      `💰 Incrementing weekly Opus cost for ${keyId}, period: ${periodStr}, rated: $${amount}, real: $${actualRealAmount}`
     )
 
     // 使用 pipeline 批量执行，提高性能
     const pipeline = this.client.pipeline()
     pipeline.incrbyfloat(weeklyKey, amount)
     pipeline.incrbyfloat(totalKey, amount)
+    pipeline.incrbyfloat(realWeeklyKey, actualRealAmount)
+    pipeline.incrbyfloat(realTotalKey, actualRealAmount)
     // 设置周费用键的过期时间为 2 周
     pipeline.expire(weeklyKey, 14 * 24 * 3600)
+    pipeline.expire(realWeeklyKey, 14 * 24 * 3600)
 
     const results = await pipeline.exec()
     logger.debug(`💰 Opus cost incremented successfully, new weekly total: $${results[0][1]}`)
   }
 
-  // 💰 计算账户的每日费用（基于模型使用）
+  // 💰 覆盖设置本周 Opus 费用（用于启动回填/迁移，支持自定义周期标识）
+  async setWeeklyOpusCost(keyId, amount, periodString = null, resetDay = 1, resetHour = 0) {
+    const currentPeriod = periodString || getPeriodString(resetDay, resetHour)
+    const weeklyKey = `usage:opus:weekly:${keyId}:${currentPeriod}`
+
+    await this.client.set(weeklyKey, String(amount || 0))
+    // 保留 2 周，足够覆盖"当前周期 + 上周期"查看/回填
+    await this.client.expire(weeklyKey, 14 * 24 * 3600)
+  }
+
+  // 💰 计算账户的每日费用（基于模型使用，使用索引集合替代 KEYS）
   async getAccountDailyCost(accountId) {
     const CostCalculator = require('../utils/costCalculator')
     const today = getDateStringInTimezone()
 
-    // 获取账户今日所有模型的使用数据
-    const pattern = `account_usage:model:daily:${accountId}:*:${today}`
-    const modelKeys = await this.client.keys(pattern)
+    // 使用索引集合替代 KEYS 命令
+    const indexKey = `account_usage:model:daily:index:${today}`
+    const allEntries = await this.client.smembers(indexKey)
 
-    if (!modelKeys || modelKeys.length === 0) {
+    // 过滤出当前账户的条目（格式：accountId:model）
+    const accountPrefix = `${accountId}:`
+    const accountModels = allEntries
+      .filter((entry) => entry.startsWith(accountPrefix))
+      .map((entry) => entry.substring(accountPrefix.length))
+
+    if (accountModels.length === 0) {
       return 0
     }
 
+    // Pipeline 批量获取所有模型数据
+    const pipeline = this.client.pipeline()
+    for (const model of accountModels) {
+      pipeline.hgetall(`account_usage:model:daily:${accountId}:${model}:${today}`)
+    }
+    const results = await pipeline.exec()
+
     let totalCost = 0
+    for (let i = 0; i < accountModels.length; i++) {
+      const model = accountModels[i]
+      const [err, modelUsage] = results[i]
 
-    for (const key of modelKeys) {
-      // 从key中解析模型名称
-      // 格式：account_usage:model:daily:{accountId}:{model}:{date}
-      const parts = key.split(':')
-      const model = parts[4] // 模型名在第5个位置（索引4）
-
-      // 获取该模型的使用数据
-      const modelUsage = await this.client.hgetall(key)
-
-      if (modelUsage && (modelUsage.inputTokens || modelUsage.outputTokens)) {
+      if (!err && modelUsage && (modelUsage.inputTokens || modelUsage.outputTokens)) {
         const usage = {
           input_tokens: parseInt(modelUsage.inputTokens || 0),
           output_tokens: parseInt(modelUsage.outputTokens || 0),
@@ -1143,7 +1971,16 @@ class RedisClient {
           cache_read_input_tokens: parseInt(modelUsage.cacheReadTokens || 0)
         }
 
-        // 使用CostCalculator计算费用
+        // 添加 cache_creation 子对象以支持精确 ephemeral 定价
+        const eph5m = parseInt(modelUsage.ephemeral5mTokens) || 0
+        const eph1h = parseInt(modelUsage.ephemeral1hTokens) || 0
+        if (eph5m > 0 || eph1h > 0) {
+          usage.cache_creation = {
+            ephemeral_5m_input_tokens: eph5m,
+            ephemeral_1h_input_tokens: eph1h
+          }
+        }
+
         const costResult = CostCalculator.calculateCost(usage, model)
         totalCost += costResult.costs.total
 
@@ -1154,6 +1991,151 @@ class RedisClient {
     }
 
     logger.debug(`💰 Account ${accountId} total daily cost: $${totalCost}`)
+    return totalCost
+  }
+
+  // 💰 批量计算多个账户的每日费用
+  async batchGetAccountDailyCost(accountIds) {
+    if (!accountIds || accountIds.length === 0) {
+      return new Map()
+    }
+
+    const CostCalculator = require('../utils/costCalculator')
+    const today = getDateStringInTimezone()
+
+    // 一次获取索引
+    const indexKey = `account_usage:model:daily:index:${today}`
+    const allEntries = await this.client.smembers(indexKey)
+
+    // 按 accountId 分组
+    const accountIdSet = new Set(accountIds)
+    const entriesByAccount = new Map()
+    for (const entry of allEntries) {
+      const colonIndex = entry.indexOf(':')
+      if (colonIndex === -1) {
+        continue
+      }
+      const accountId = entry.substring(0, colonIndex)
+      const model = entry.substring(colonIndex + 1)
+      if (accountIdSet.has(accountId)) {
+        if (!entriesByAccount.has(accountId)) {
+          entriesByAccount.set(accountId, [])
+        }
+        entriesByAccount.get(accountId).push(model)
+      }
+    }
+
+    const costMap = new Map(accountIds.map((id) => [id, 0]))
+
+    // 如果索引为空，回退到 KEYS 命令（兼容旧数据）
+    if (allEntries.length === 0) {
+      logger.debug('💰 Daily cost index empty, falling back to KEYS for batch cost calculation')
+      for (const accountId of accountIds) {
+        try {
+          const cost = await this.getAccountDailyCostFallback(accountId, today, CostCalculator)
+          costMap.set(accountId, cost)
+        } catch {
+          // 忽略单个账户的错误
+        }
+      }
+      return costMap
+    }
+
+    // Pipeline 批量获取所有模型数据
+    const pipeline = this.client.pipeline()
+    const queryOrder = []
+    for (const [accountId, models] of entriesByAccount) {
+      for (const model of models) {
+        pipeline.hgetall(`account_usage:model:daily:${accountId}:${model}:${today}`)
+        queryOrder.push({ accountId, model })
+      }
+    }
+
+    if (queryOrder.length === 0) {
+      return costMap
+    }
+
+    const results = await pipeline.exec()
+
+    for (let i = 0; i < queryOrder.length; i++) {
+      const { accountId, model } = queryOrder[i]
+      const [err, modelUsage] = results[i]
+
+      if (!err && modelUsage && (modelUsage.inputTokens || modelUsage.outputTokens)) {
+        const usage = {
+          input_tokens: parseInt(modelUsage.inputTokens || 0),
+          output_tokens: parseInt(modelUsage.outputTokens || 0),
+          cache_creation_input_tokens: parseInt(modelUsage.cacheCreateTokens || 0),
+          cache_read_input_tokens: parseInt(modelUsage.cacheReadTokens || 0)
+        }
+
+        // 添加 cache_creation 子对象以支持精确 ephemeral 定价
+        const eph5m = parseInt(modelUsage.ephemeral5mTokens) || 0
+        const eph1h = parseInt(modelUsage.ephemeral1hTokens) || 0
+        if (eph5m > 0 || eph1h > 0) {
+          usage.cache_creation = {
+            ephemeral_5m_input_tokens: eph5m,
+            ephemeral_1h_input_tokens: eph1h
+          }
+        }
+
+        const costResult = CostCalculator.calculateCost(usage, model)
+        costMap.set(accountId, costMap.get(accountId) + costResult.costs.total)
+      }
+    }
+
+    return costMap
+  }
+
+  // 💰 回退方法：计算单个账户的每日费用（使用 scanKeys 替代 keys）
+  async getAccountDailyCostFallback(accountId, today, CostCalculator) {
+    const pattern = `account_usage:model:daily:${accountId}:*:${today}`
+    const modelKeys = await this.scanKeys(pattern)
+
+    if (!modelKeys || modelKeys.length === 0) {
+      return 0
+    }
+
+    let totalCost = 0
+    const pipeline = this.client.pipeline()
+    for (const key of modelKeys) {
+      pipeline.hgetall(key)
+    }
+    const results = await pipeline.exec()
+
+    for (let i = 0; i < modelKeys.length; i++) {
+      const key = modelKeys[i]
+      const [err, modelUsage] = results[i]
+      if (err || !modelUsage) {
+        continue
+      }
+
+      const parts = key.split(':')
+      const model = parts[4]
+
+      if (modelUsage.inputTokens || modelUsage.outputTokens) {
+        const usage = {
+          input_tokens: parseInt(modelUsage.inputTokens || 0),
+          output_tokens: parseInt(modelUsage.outputTokens || 0),
+          cache_creation_input_tokens: parseInt(modelUsage.cacheCreateTokens || 0),
+          cache_read_input_tokens: parseInt(modelUsage.cacheReadTokens || 0)
+        }
+
+        // 添加 cache_creation 子对象以支持精确 ephemeral 定价
+        const eph5m = parseInt(modelUsage.ephemeral5mTokens) || 0
+        const eph1h = parseInt(modelUsage.ephemeral1hTokens) || 0
+        if (eph5m > 0 || eph1h > 0) {
+          usage.cache_creation = {
+            ephemeral_5m_input_tokens: eph5m,
+            ephemeral_1h_input_tokens: eph1h
+          }
+        }
+
+        const costResult = CostCalculator.calculateCost(usage, model)
+        totalCost += costResult.costs.total
+      }
+    }
+
     return totalCost
   }
 
@@ -1184,8 +2166,11 @@ class RedisClient {
     } else if (accountType === 'openai-responses') {
       accountData = await this.client.hgetall(`openai_responses_account:${accountId}`)
     } else {
-      // 尝试多个前缀
-      accountData = await this.client.hgetall(`claude_account:${accountId}`)
+      // 尝试多个前缀（优先 claude:account:）
+      accountData = await this.client.hgetall(`claude:account:${accountId}`)
+      if (!accountData.createdAt) {
+        accountData = await this.client.hgetall(`claude_account:${accountId}`)
+      }
       if (!accountData.createdAt) {
         accountData = await this.client.hgetall(`openai:account:${accountId}`)
       }
@@ -1264,15 +2249,24 @@ class RedisClient {
   // 📈 获取所有账户的使用统计
   async getAllAccountsUsageStats() {
     try {
-      // 获取所有Claude账户
-      const accountKeys = await this.client.keys('claude_account:*')
+      // 使用 getAllIdsByIndex 获取账户 ID（自动处理索引/SCAN 回退）
+      const accountIds = await this.getAllIdsByIndex(
+        'claude:account:index',
+        'claude:account:*',
+        /^claude:account:(.+)$/
+      )
+
+      if (accountIds.length === 0) {
+        return []
+      }
+
       const accountStats = []
 
-      for (const accountKey of accountKeys) {
-        const accountId = accountKey.replace('claude_account:', '')
+      for (const accountId of accountIds) {
+        const accountKey = `claude:account:${accountId}`
         const accountData = await this.client.hgetall(accountKey)
 
-        if (accountData.name) {
+        if (accountData && accountData.name) {
           const stats = await this.getAccountUsageStats(accountId)
           accountStats.push({
             id: accountId,
@@ -1295,7 +2289,7 @@ class RedisClient {
     }
   }
 
-  // 🧹 清空所有API Key的使用统计数据
+  // 🧹 清空所有API Key的使用统计数据（使用 scanKeys + batchDelChunked 优化）
   async resetAllUsageStats() {
     const client = this.getClientSafe()
     const stats = {
@@ -1306,56 +2300,53 @@ class RedisClient {
     }
 
     try {
-      // 获取所有API Key ID
-      const apiKeyIds = []
-      const apiKeyKeys = await client.keys('apikey:*')
+      // 1. 获取所有 API Key ID（使用 scanKeys）
+      const apiKeyKeys = await this.scanKeys('apikey:*')
+      const apiKeyIds = apiKeyKeys
+        .filter((k) => k !== 'apikey:hash_map' && k.split(':').length === 2)
+        .map((k) => k.replace('apikey:', ''))
 
-      for (const key of apiKeyKeys) {
-        if (key === 'apikey:hash_map') {
-          continue
-        } // 跳过哈希映射表
-        const keyId = key.replace('apikey:', '')
-        apiKeyIds.push(keyId)
+      // 2. 批量删除总体使用统计
+      const usageKeys = apiKeyIds.map((id) => `usage:${id}`)
+      stats.deletedKeys = await this.batchDelChunked(usageKeys)
+
+      // 3. 使用 scanKeys 获取并批量删除 daily 统计
+      const dailyKeys = await this.scanKeys('usage:daily:*')
+      stats.deletedDailyKeys = await this.batchDelChunked(dailyKeys)
+
+      // 4. 使用 scanKeys 获取并批量删除 monthly 统计
+      const monthlyKeys = await this.scanKeys('usage:monthly:*')
+      stats.deletedMonthlyKeys = await this.batchDelChunked(monthlyKeys)
+
+      // 5. 批量重置 lastUsedAt（仅对存在的 key 操作，避免重建空 hash）
+      const BATCH_SIZE = 500
+      for (let i = 0; i < apiKeyIds.length; i += BATCH_SIZE) {
+        const batch = apiKeyIds.slice(i, i + BATCH_SIZE)
+        const existsPipeline = client.pipeline()
+        for (const keyId of batch) {
+          existsPipeline.exists(`apikey:${keyId}`)
+        }
+        const existsResults = await existsPipeline.exec()
+
+        const updatePipeline = client.pipeline()
+        let updateCount = 0
+        for (let j = 0; j < batch.length; j++) {
+          const [err, exists] = existsResults[j]
+          if (!err && exists) {
+            updatePipeline.hset(`apikey:${batch[j]}`, 'lastUsedAt', '')
+            updateCount++
+          }
+        }
+        if (updateCount > 0) {
+          await updatePipeline.exec()
+          stats.resetApiKeys += updateCount
+        }
       }
 
-      // 清空每个API Key的使用统计
-      for (const keyId of apiKeyIds) {
-        // 删除总体使用统计
-        const usageKey = `usage:${keyId}`
-        const deleted = await client.del(usageKey)
-        if (deleted > 0) {
-          stats.deletedKeys++
-        }
-
-        // 删除该API Key的每日统计（使用精确的keyId匹配）
-        const dailyKeys = await client.keys(`usage:daily:${keyId}:*`)
-        if (dailyKeys.length > 0) {
-          await client.del(...dailyKeys)
-          stats.deletedDailyKeys += dailyKeys.length
-        }
-
-        // 删除该API Key的每月统计（使用精确的keyId匹配）
-        const monthlyKeys = await client.keys(`usage:monthly:${keyId}:*`)
-        if (monthlyKeys.length > 0) {
-          await client.del(...monthlyKeys)
-          stats.deletedMonthlyKeys += monthlyKeys.length
-        }
-
-        // 重置API Key的lastUsedAt字段
-        const keyData = await client.hgetall(`apikey:${keyId}`)
-        if (keyData && Object.keys(keyData).length > 0) {
-          keyData.lastUsedAt = ''
-          await client.hset(`apikey:${keyId}`, keyData)
-          stats.resetApiKeys++
-        }
-      }
-
-      // 额外清理：删除所有可能遗漏的usage相关键
-      const allUsageKeys = await client.keys('usage:*')
-      if (allUsageKeys.length > 0) {
-        await client.del(...allUsageKeys)
-        stats.deletedKeys += allUsageKeys.length
-      }
+      // 6. 清理所有 usage 相关键（使用 scanKeys + batchDelChunked）
+      const allUsageKeys = await this.scanKeys('usage:*')
+      const additionalDeleted = await this.batchDelChunked(allUsageKeys)
+      stats.deletedKeys += additionalDeleted
 
       return stats
     } catch (error) {
@@ -1367,6 +2358,8 @@ class RedisClient {
   async setClaudeAccount(accountId, accountData) {
     const key = `claude:account:${accountId}`
     await this.client.hset(key, accountData)
+    await this.client.sadd('claude:account:index', accountId)
+    await this.client.del('claude:account:index:empty')
   }
 
   async getClaudeAccount(accountId) {
@@ -1375,19 +2368,32 @@ class RedisClient {
   }
 
   async getAllClaudeAccounts() {
-    const keys = await this.client.keys('claude:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('claude:account:', ''), ...accountData })
-      }
+    const accountIds = await this.getAllIdsByIndex(
+      'claude:account:index',
+      'claude:account:*',
+      /^claude:account:(.+)$/
+    )
+    if (accountIds.length === 0) {
+      return []
     }
+
+    const keys = accountIds.map((id) => `claude:account:${id}`)
+    const pipeline = this.client.pipeline()
+    keys.forEach((key) => pipeline.hgetall(key))
+    const results = await pipeline.exec()
+
+    const accounts = []
+    results.forEach(([err, accountData], index) => {
+      if (!err && accountData && Object.keys(accountData).length > 0) {
+        accounts.push({ id: accountIds[index], ...accountData })
+      }
+    })
     return accounts
   }
 
   async deleteClaudeAccount(accountId) {
     const key = `claude:account:${accountId}`
+    await this.client.srem('claude:account:index', accountId)
     return await this.client.del(key)
   }
 
@@ -1395,6 +2401,8 @@ class RedisClient {
   async setDroidAccount(accountId, accountData) {
     const key = `droid:account:${accountId}`
     await this.client.hset(key, accountData)
+    await this.client.sadd('droid:account:index', accountId)
+    await this.client.del('droid:account:index:empty')
   }
 
   async getDroidAccount(accountId) {
@@ -1403,25 +2411,41 @@ class RedisClient {
   }
 
   async getAllDroidAccounts() {
-    const keys = await this.client.keys('droid:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('droid:account:', ''), ...accountData })
-      }
+    const accountIds = await this.getAllIdsByIndex(
+      'droid:account:index',
+      'droid:account:*',
+      /^droid:account:(.+)$/
+    )
+    if (accountIds.length === 0) {
+      return []
     }
+
+    const keys = accountIds.map((id) => `droid:account:${id}`)
+    const pipeline = this.client.pipeline()
+    keys.forEach((key) => pipeline.hgetall(key))
+    const results = await pipeline.exec()
+
+    const accounts = []
+    results.forEach(([err, accountData], index) => {
+      if (!err && accountData && Object.keys(accountData).length > 0) {
+        accounts.push({ id: accountIds[index], ...accountData })
+      }
+    })
     return accounts
   }
 
   async deleteDroidAccount(accountId) {
     const key = `droid:account:${accountId}`
+    // 从索引中移除
+    await this.client.srem('droid:account:index', accountId)
     return await this.client.del(key)
   }
 
   async setOpenAiAccount(accountId, accountData) {
     const key = `openai:account:${accountId}`
     await this.client.hset(key, accountData)
+    await this.client.sadd('openai:account:index', accountId)
+    await this.client.del('openai:account:index:empty')
   }
   async getOpenAiAccount(accountId) {
     const key = `openai:account:${accountId}`
@@ -1429,18 +2453,31 @@ class RedisClient {
   }
   async deleteOpenAiAccount(accountId) {
     const key = `openai:account:${accountId}`
+    await this.client.srem('openai:account:index', accountId)
     return await this.client.del(key)
   }
 
   async getAllOpenAIAccounts() {
-    const keys = await this.client.keys('openai:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('openai:account:', ''), ...accountData })
-      }
+    const accountIds = await this.getAllIdsByIndex(
+      'openai:account:index',
+      'openai:account:*',
+      /^openai:account:(.+)$/
+    )
+    if (accountIds.length === 0) {
+      return []
     }
+
+    const keys = accountIds.map((id) => `openai:account:${id}`)
+    const pipeline = this.client.pipeline()
+    keys.forEach((key) => pipeline.hgetall(key))
+    const results = await pipeline.exec()
+
+    const accounts = []
+    results.forEach(([err, accountData], index) => {
+      if (!err && accountData && Object.keys(accountData).length > 0) {
+        accounts.push({ id: accountIds[index], ...accountData })
+      }
+    })
     return accounts
   }
 
@@ -1461,12 +2498,17 @@ class RedisClient {
     return await this.client.del(key)
   }
 
-  // 🗝️ API Key哈希索引管理
+  // 🗝️ API Key哈希索引管理（兼容旧结构 apikey_hash:* 和新结构 apikey:hash_map）
   async setApiKeyHash(hashedKey, keyData, ttl = 0) {
+    // 写入旧结构（兼容）
     const key = `apikey_hash:${hashedKey}`
     await this.client.hset(key, keyData)
     if (ttl > 0) {
       await this.client.expire(key, ttl)
+    }
+    // 同时写入新结构 hash_map（认证使用此结构）
+    if (keyData.id) {
+      await this.client.hset('apikey:hash_map', hashedKey, keyData.id)
     }
   }
 
@@ -1476,8 +2518,11 @@ class RedisClient {
   }
 
   async deleteApiKeyHash(hashedKey) {
-    const key = `apikey_hash:${hashedKey}`
-    return await this.client.del(key)
+    // 同时清理旧结构和新结构，确保 Key 轮换/删除后旧 Key 失效
+    const oldKey = `apikey_hash:${hashedKey}`
+    await this.client.del(oldKey)
+    // 从新的 hash_map 中移除（认证使用此结构）
+    await this.client.hdel('apikey:hash_map', hashedKey)
   }
 
   // 🔗 OAuth会话管理
@@ -1638,26 +2683,58 @@ class RedisClient {
     return await this.client.del(key)
   }
 
-  // 📈 系统统计
+  // 📈 系统统计（使用 scanKeys 替代 keys）
   async getSystemStats() {
     const keys = await Promise.all([
-      this.client.keys('apikey:*'),
-      this.client.keys('claude:account:*'),
-      this.client.keys('usage:*')
+      this.scanKeys('apikey:*'),
+      this.scanKeys('claude:account:*'),
+      this.scanKeys('usage:*')
     ])
 
+    // 过滤 apikey 索引键，只统计实际的 apikey
+    const apiKeyCount = keys[0].filter(
+      (k) => k !== 'apikey:hash_map' && k.split(':').length === 2
+    ).length
+
     return {
-      totalApiKeys: keys[0].length,
+      totalApiKeys: apiKeyCount,
       totalClaudeAccounts: keys[1].length,
       totalUsageRecords: keys[2].length
     }
+  }
+
+  // 🔍 通过索引获取 key 列表（替代 SCAN）
+  async getKeysByIndex(indexKey, keyPattern) {
+    const members = await this.client.smembers(indexKey)
+    if (!members || members.length === 0) {
+      return []
+    }
+    return members.map((id) => keyPattern.replace('{id}', id))
+  }
+
+  // 🔍 批量通过索引获取数据
+  async getDataByIndex(indexKey, keyPattern) {
+    const keys = await this.getKeysByIndex(indexKey, keyPattern)
+    if (keys.length === 0) {
+      return []
+    }
+    return await this.batchHgetallChunked(keys)
   }
 
   // 📊 获取今日系统统计
   async getTodayStats() {
     try {
       const today = getDateStringInTimezone()
-      const dailyKeys = await this.client.keys(`usage:daily:*:${today}`)
+      // 优先使用索引查询，回退到 SCAN
+      let dailyKeys = []
+      const indexKey = `usage:daily:index:${today}`
+      const indexMembers = await this.client.smembers(indexKey)
+      if (indexMembers && indexMembers.length > 0) {
+        dailyKeys = indexMembers.map((keyId) => `usage:daily:${keyId}:${today}`)
+      } else {
+        // 回退到 SCAN（兼容历史数据）
+        dailyKeys = await this.scanKeys(`usage:daily:*:${today}`)
+      }
 
       let totalRequestsToday = 0
       let totalTokensToday = 0
@@ -1668,12 +2745,10 @@ class RedisClient {
 
       // 批量获取所有今日数据，提高性能
       if (dailyKeys.length > 0) {
-        const pipeline = this.client.pipeline()
-        dailyKeys.forEach((key) => pipeline.hgetall(key))
-        const results = await pipeline.exec()
+        const results = await this.batchHgetallChunked(dailyKeys)
 
-        for (const [error, dailyData] of results) {
-          if (error || !dailyData) {
+        for (const dailyData of results) {
+          if (!dailyData) {
             continue
           }
 
@@ -1705,7 +2780,7 @@ class RedisClient {
       }
 
       // 获取今日创建的API Key数量（批量优化）
-      const allApiKeys = await this.client.keys('apikey:*')
+      const allApiKeys = await this.scanKeys('apikey:*')
       let apiKeysCreatedToday = 0
 
       if (allApiKeys.length > 0) {
@@ -1746,7 +2821,7 @@ class RedisClient {
   // 📈 获取系统总的平均RPM和TPM
   async getSystemAverages() {
     try {
-      const allApiKeys = await this.client.keys('apikey:*')
+      const allApiKeys = await this.scanKeys('apikey:*')
       let totalRequests = 0
       let totalTokens = 0
       let totalInputTokens = 0
@@ -1978,13 +3053,13 @@ class RedisClient {
     return await this.client.del(key)
   }
 
-  // 🧹 清理过期数据
+  // 🧹 清理过期数据（使用 scanKeys 替代 keys）
   async cleanup() {
     try {
       const patterns = ['usage:daily:*', 'ratelimit:*', 'session:*', 'sticky_session:*', 'oauth:*']
 
       for (const pattern of patterns) {
-        const keys = await this.client.keys(pattern)
+        const keys = await this.scanKeys(pattern)
         const pipeline = this.client.pipeline()
 
         for (const key of keys) {
@@ -2246,13 +3321,13 @@ class RedisClient {
   // 🔧 并发管理方法（用于管理员手动清理）
 
   /**
-   * 获取所有并发状态
+   * 获取所有并发状态（使用 scanKeys 替代 keys）
    * @returns {Promise<Array>} 并发状态列表
    */
   async getAllConcurrencyStatus() {
     try {
       const client = this.getClientSafe()
-      const keys = await client.keys('concurrency:*')
+      const keys = await this.scanKeys('concurrency:*')
       const now = Date.now()
       const results = []
 
@@ -2445,13 +3520,13 @@ class RedisClient {
   }
 
   /**
-   * 强制清理所有并发计数
+   * 强制清理所有并发计数（使用 scanKeys 替代 keys）
    * @returns {Promise<Object>} 清理结果
    */
   async forceClearAllConcurrency() {
     try {
       const client = this.getClientSafe()
-      const keys = await client.keys('concurrency:*')
+      const keys = await this.scanKeys('concurrency:*')
 
       let totalCleared = 0
       let legacyCleared = 0
@@ -2505,7 +3580,7 @@ class RedisClient {
   }
 
   /**
-   * 清理过期的并发条目（不影响活跃请求）
+   * 清理过期的并发条目（不影响活跃请求，使用 scanKeys 替代 keys）
    * @param {string} apiKeyId - API Key ID（可选，不传则清理所有）
    * @returns {Promise<Object>} 清理结果
    */
@@ -2518,7 +3593,7 @@ class RedisClient {
       if (apiKeyId) {
         keys = [`concurrency:${apiKeyId}`]
       } else {
-        keys = await client.keys('concurrency:*')
+        keys = await this.scanKeys('concurrency:*')
       }
 
       let totalCleaned = 0
@@ -2706,6 +3781,8 @@ class RedisClient {
                   outputTokens: 0,
                   cacheCreateTokens: 0,
                   cacheReadTokens: 0,
+                  ephemeral5mTokens: 0,
+                  ephemeral1hTokens: 0,
                   allTokens: 0,
                   requests: 0
                 }
@@ -2719,6 +3796,10 @@ class RedisClient {
                 modelUsage[modelName].cacheCreateTokens += parseInt(value || 0)
               } else if (metric === 'cacheReadTokens') {
                 modelUsage[modelName].cacheReadTokens += parseInt(value || 0)
+              } else if (metric === 'ephemeral5mTokens') {
+                modelUsage[modelName].ephemeral5mTokens += parseInt(value || 0)
+              } else if (metric === 'ephemeral1hTokens') {
+                modelUsage[modelName].ephemeral1hTokens += parseInt(value || 0)
               } else if (metric === 'allTokens') {
                 modelUsage[modelName].allTokens += parseInt(value || 0)
               } else if (metric === 'requests') {
@@ -2800,6 +3881,9 @@ redisClient.getDateInTimezone = getDateInTimezone
 redisClient.getDateStringInTimezone = getDateStringInTimezone
 redisClient.getHourInTimezone = getHourInTimezone
 redisClient.getWeekStringInTimezone = getWeekStringInTimezone
+redisClient.getPeriodString = getPeriodString
+redisClient.getNextResetTime = getNextResetTime
+redisClient.getPeriodStartDate = getPeriodStartDate
 
 // ============== 用户消息队列相关方法 ==============
 
@@ -3633,6 +4717,565 @@ redisClient.getAccountLastTestTime = async function (accountId, platform) {
     logger.error(`Failed to get last test time for ${accountId}:`, error)
     return null
   }
+}
+
+/**
+ * 使用 SCAN 获取匹配模式的所有 keys（避免 KEYS 命令阻塞 Redis）
+ * @param {string} pattern - 匹配模式，如 'usage:model:daily:*:2025-01-01'
+ * @param {number} batchSize - 每次 SCAN 的数量，默认 200
+ * @returns {Promise<string[]>} 匹配的 key 列表
+ */
+redisClient.scanKeys = async function (pattern, batchSize = 200) {
+  const keys = []
+  let cursor = '0'
+  const client = this.getClientSafe()
+
+  do {
+    const [newCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', batchSize)
+    cursor = newCursor
+    keys.push(...batch)
+  } while (cursor !== '0')
+
+  // 去重（SCAN 可能返回重复 key）
+  return [...new Set(keys)]
+}
+
+/**
+ * 批量 HGETALL（使用 Pipeline 减少网络往返）
+ * @param {string[]} keys - 要获取的 key 列表
+ * @returns {Promise<Object[]>} 每个 key 对应的数据，失败的返回 null
+ */
+redisClient.batchHgetall = async function (keys) {
+  if (!keys || keys.length === 0) {
+    return []
+  }
+
+  const client = this.getClientSafe()
+  const pipeline = client.pipeline()
+  keys.forEach((k) => pipeline.hgetall(k))
+  const results = await pipeline.exec()
+
+  return results.map(([err, data]) => (err ? null : data))
+}
+
+/**
+ * 使用 SCAN + Pipeline 获取匹配模式的所有数据
+ * @param {string} pattern - 匹配模式
+ * @param {number} batchSize - SCAN 批次大小
+ * @returns {Promise<{key: string, data: Object}[]>} key 和数据的数组
+ */
+redisClient.scanAndGetAll = async function (pattern, batchSize = 200) {
+  const keys = await this.scanKeys(pattern, batchSize)
+  if (keys.length === 0) {
+    return []
+  }
+
+  const dataList = await this.batchHgetall(keys)
+  return keys.map((key, i) => ({ key, data: dataList[i] })).filter((item) => item.data !== null)
+}
+
+/**
+ * 批量获取多个 API Key 的使用统计、费用、并发等数据
+ * @param {string[]} keyIds - API Key ID 列表
+ * @returns {Promise<Map<string, Object>>} keyId -> 统计数据的映射
+ */
+redisClient.batchGetApiKeyStats = async function (keyIds) {
+  if (!keyIds || keyIds.length === 0) {
+    return new Map()
+  }
+
+  const client = this.getClientSafe()
+  const today = getDateStringInTimezone()
+  const tzDate = getDateInTimezone()
+  const currentMonth = `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(2, '0')}`
+  const currentWeek = getWeekStringInTimezone()
+  const currentHour = `${today}:${String(getHourInTimezone(new Date())).padStart(2, '0')}`
+
+  const pipeline = client.pipeline()
+
+  // 为每个 keyId 添加所有需要的查询
+  for (const keyId of keyIds) {
+    // usage stats (3 hgetall)
+    pipeline.hgetall(`usage:${keyId}`)
+    pipeline.hgetall(`usage:daily:${keyId}:${today}`)
+    pipeline.hgetall(`usage:monthly:${keyId}:${currentMonth}`)
+    // cost stats (4 get)
+    pipeline.get(`usage:cost:daily:${keyId}:${today}`)
+    pipeline.get(`usage:cost:monthly:${keyId}:${currentMonth}`)
+    pipeline.get(`usage:cost:hourly:${keyId}:${currentHour}`)
+    pipeline.get(`usage:cost:total:${keyId}`)
+    // concurrency (1 zcard)
+    pipeline.zcard(`concurrency:${keyId}`)
+    // weekly opus cost (1 get)
+    pipeline.get(`usage:opus:weekly:${keyId}:${currentWeek}`)
+    // rate limit (4 get)
+    pipeline.get(`rate_limit:requests:${keyId}`)
+    pipeline.get(`rate_limit:tokens:${keyId}`)
+    pipeline.get(`rate_limit:cost:${keyId}`)
+    pipeline.get(`rate_limit:window_start:${keyId}`)
+    // apikey data for createdAt (1 hgetall)
+    pipeline.hgetall(`apikey:${keyId}`)
+  }
+
+  const results = await pipeline.exec()
+  const statsMap = new Map()
+  const FIELDS_PER_KEY = 14
+
+  for (let i = 0; i < keyIds.length; i++) {
+    const keyId = keyIds[i]
+    const offset = i * FIELDS_PER_KEY
+
+    const [
+      [, usageTotal],
+      [, usageDaily],
+      [, usageMonthly],
+      [, costDaily],
+      [, costMonthly],
+      [, costHourly],
+      [, costTotal],
+      [, concurrency],
+      [, weeklyOpusCost],
+      [, rateLimitRequests],
+      [, rateLimitTokens],
+      [, rateLimitCost],
+      [, rateLimitWindowStart],
+      [, keyData]
+    ] = results.slice(offset, offset + FIELDS_PER_KEY)
+
+    statsMap.set(keyId, {
+      usageTotal: usageTotal || {},
+      usageDaily: usageDaily || {},
+      usageMonthly: usageMonthly || {},
+      costStats: {
+        daily: parseFloat(costDaily || 0),
+        monthly: parseFloat(costMonthly || 0),
+        hourly: parseFloat(costHourly || 0),
+        total: parseFloat(costTotal || 0)
+      },
+      concurrency: concurrency || 0,
+      dailyCost: parseFloat(costDaily || 0),
+      weeklyOpusCost: parseFloat(weeklyOpusCost || 0),
+      rateLimit: {
+        requests: parseInt(rateLimitRequests || 0),
+        tokens: parseInt(rateLimitTokens || 0),
+        cost: parseFloat(rateLimitCost || 0),
+        windowStart: rateLimitWindowStart ? parseInt(rateLimitWindowStart) : null
+      },
+      createdAt: keyData?.createdAt || null
+    })
+  }
+
+  return statsMap
+}
+
+/**
+ * 分批 HGETALL（避免单次 pipeline 体积过大导致内存峰值）
+ * @param {string[]} keys - 要获取的 key 列表
+ * @param {number} chunkSize - 每批大小，默认 500
+ * @returns {Promise<Object[]>} 每个 key 对应的数据，失败的返回 null
+ */
+redisClient.batchHgetallChunked = async function (keys, chunkSize = 500) {
+  if (!keys || keys.length === 0) {
+    return []
+  }
+  if (keys.length <= chunkSize) {
+    return this.batchHgetall(keys)
+  }
+
+  const results = []
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize)
+    const chunkResults = await this.batchHgetall(chunk)
+    results.push(...chunkResults)
+  }
+  return results
+}
+
+/**
+ * 分批 GET（避免单次 pipeline 体积过大）
+ * @param {string[]} keys - 要获取的 key 列表
+ * @param {number} chunkSize - 每批大小，默认 500
+ * @returns {Promise<(string|null)[]>} 每个 key 对应的值
+ */
+redisClient.batchGetChunked = async function (keys, chunkSize = 500) {
+  if (!keys || keys.length === 0) {
+    return []
+  }
+
+  const client = this.getClientSafe()
+  if (keys.length <= chunkSize) {
+    const pipeline = client.pipeline()
+    keys.forEach((k) => pipeline.get(k))
+    const results = await pipeline.exec()
+    return results.map(([err, val]) => (err ? null : val))
+  }
+
+  const results = []
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize)
+    const pipeline = client.pipeline()
+    chunk.forEach((k) => pipeline.get(k))
+    const chunkResults = await pipeline.exec()
+    results.push(...chunkResults.map(([err, val]) => (err ? null : val)))
+  }
+  return results
+}
+
+/**
+ * SCAN + 分批处理（边扫描边处理，避免全量 keys 堆内存）
+ * @param {string} pattern - 匹配模式
+ * @param {Function} processor - 处理函数 (keys: string[], dataList: Object[]) => void
+ * @param {Object} options - 配置选项
+ * @param {number} options.scanBatchSize - SCAN 每次返回数量，默认 200
+ * @param {number} options.processBatchSize - 处理批次大小，默认 500
+ * @param {string} options.fetchType - 获取类型：'hgetall' | 'get' | 'none'，默认 'hgetall'
+ */
+redisClient.scanAndProcess = async function (pattern, processor, options = {}) {
+  const { scanBatchSize = 200, processBatchSize = 500, fetchType = 'hgetall' } = options
+  const client = this.getClientSafe()
+
+  let cursor = '0'
+  let pendingKeys = []
+  const processedKeys = new Set() // 全程去重
+
+  const processBatch = async (keys) => {
+    if (keys.length === 0) {
+      return
+    }
+
+    // 过滤已处理的 key
+    const uniqueKeys = keys.filter((k) => !processedKeys.has(k))
+    if (uniqueKeys.length === 0) {
+      return
+    }
+
+    uniqueKeys.forEach((k) => processedKeys.add(k))
+
+    let dataList = []
+    if (fetchType === 'hgetall') {
+      dataList = await this.batchHgetall(uniqueKeys)
+    } else if (fetchType === 'get') {
+      const pipeline = client.pipeline()
+      uniqueKeys.forEach((k) => pipeline.get(k))
+      const results = await pipeline.exec()
+      dataList = results.map(([err, val]) => (err ? null : val))
+    } else {
+      dataList = uniqueKeys.map(() => null) // fetchType === 'none'
+    }
+
+    await processor(uniqueKeys, dataList)
+  }
+
+  do {
+    const [newCursor, batch] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', scanBatchSize)
+    cursor = newCursor
+    pendingKeys.push(...batch)
+
+    // 达到处理批次大小时处理
+    while (pendingKeys.length >= processBatchSize) {
+      const toProcess = pendingKeys.slice(0, processBatchSize)
+      pendingKeys = pendingKeys.slice(processBatchSize)
+      await processBatch(toProcess)
+    }
+  } while (cursor !== '0')
+
+  // 处理剩余的 keys
+  if (pendingKeys.length > 0) {
+    await processBatch(pendingKeys)
+  }
+}
+
+/**
+ * SCAN + 分批获取所有数据（返回结果，适合需要聚合的场景）
+ * @param {string} pattern - 匹配模式
+ * @param {Object} options - 配置选项
+ * @returns {Promise<{key: string, data: Object}[]>} key 和数据的数组
+ */
+redisClient.scanAndGetAllChunked = async function (pattern, options = {}) {
+  const results = []
+  await this.scanAndProcess(
+    pattern,
+    (keys, dataList) => {
+      keys.forEach((key, i) => {
+        if (dataList[i] !== null) {
+          results.push({ key, data: dataList[i] })
+        }
+      })
+    },
+    { ...options, fetchType: 'hgetall' }
+  )
+  return results
+}
+
+/**
+ * 分批删除 keys（避免大量 DEL 阻塞）
+ * @param {string[]} keys - 要删除的 key 列表
+ * @param {number} chunkSize - 每批大小，默认 500
+ * @returns {Promise<number>} 删除的 key 数量
+ */
+redisClient.batchDelChunked = async function (keys, chunkSize = 500) {
+  if (!keys || keys.length === 0) {
+    return 0
+  }
+
+  const client = this.getClientSafe()
+  let deleted = 0
+
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize)
+    const pipeline = client.pipeline()
+    chunk.forEach((k) => pipeline.del(k))
+    const results = await pipeline.exec()
+    deleted += results.filter(([err, val]) => !err && val > 0).length
+  }
+
+  return deleted
+}
+
+/**
+ * 通用索引辅助函数：获取所有 ID（优先索引，回退 SCAN）
+ * @param {string} indexKey - 索引 Set 的 key
+ * @param {string} scanPattern - SCAN 的 pattern
+ * @param {RegExp} extractRegex - 从 key 中提取 ID 的正则
+ * @returns {Promise<string[]>} ID 列表
+ */
+redisClient.getAllIdsByIndex = async function (indexKey, scanPattern, extractRegex) {
+  const client = this.getClientSafe()
+  // 检查是否已标记为空（避免重复 SCAN）
+  const emptyMarker = await client.get(`${indexKey}:empty`)
+  if (emptyMarker === '1') {
+    return []
+  }
+  let ids = await client.smembers(indexKey)
+  if (ids && ids.length > 0) {
+    return ids
+  }
+  // 回退到 SCAN（仅首次）
+  const keys = await this.scanKeys(scanPattern)
+  if (keys.length === 0) {
+    // 标记为空，避免重复 SCAN（1小时过期，允许新数据写入后重新检测）
+    await client.setex(`${indexKey}:empty`, 3600, '1')
+    return []
+  }
+  ids = keys
+    .map((k) => {
+      const match = k.match(extractRegex)
+      return match ? match[1] : null
+    })
+    .filter(Boolean)
+  // 建立索引
+  if (ids.length > 0) {
+    await client.sadd(indexKey, ...ids)
+  }
+  return ids
+}
+
+/**
+ * 添加到索引
+ */
+redisClient.addToIndex = async function (indexKey, id) {
+  const client = this.getClientSafe()
+  await client.sadd(indexKey, id)
+  // 清除空标记（如果存在）
+  await client.del(`${indexKey}:empty`)
+}
+
+/**
+ * 从索引移除
+ */
+redisClient.removeFromIndex = async function (indexKey, id) {
+  const client = this.getClientSafe()
+  await client.srem(indexKey, id)
+}
+
+// ============================================
+// 数据迁移相关
+// ============================================
+
+// 迁移全局统计数据（从 API Key 数据聚合）
+redisClient.migrateGlobalStats = async function () {
+  logger.info('🔄 开始迁移全局统计数据...')
+
+  const keyIds = await this.scanApiKeyIds()
+  if (!keyIds || keyIds.length === 0) {
+    logger.info('📊 没有 API Key 数据需要迁移')
+    return { success: true, migrated: 0 }
+  }
+
+  const total = {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreateTokens: 0,
+    cacheReadTokens: 0,
+    allTokens: 0
+  }
+
+  // 批量获取所有 usage 数据
+  const pipeline = this.client.pipeline()
+  keyIds.forEach((id) => pipeline.hgetall(`usage:${id}`))
+  const results = await pipeline.exec()
+
+  results.forEach(([err, usage]) => {
+    if (err || !usage) {
+      return
+    }
+    // 兼容新旧字段格式（带 total 前缀和不带的）
+    total.requests += parseInt(usage.totalRequests || usage.requests) || 0
+    total.inputTokens += parseInt(usage.totalInputTokens || usage.inputTokens) || 0
+    total.outputTokens += parseInt(usage.totalOutputTokens || usage.outputTokens) || 0
+    total.cacheCreateTokens +=
+      parseInt(usage.totalCacheCreateTokens || usage.cacheCreateTokens) || 0
+    total.cacheReadTokens += parseInt(usage.totalCacheReadTokens || usage.cacheReadTokens) || 0
+    total.allTokens += parseInt(usage.totalAllTokens || usage.allTokens || usage.totalTokens) || 0
+  })
+
+  // 写入全局统计
+  await this.client.hset('usage:global:total', total)
+
+  // 迁移月份索引（从现有的 usage:model:monthly:* key 中提取月份）
+  const monthlyKeys = await this.client.keys('usage:model:monthly:*')
+  const months = new Set()
+  for (const key of monthlyKeys) {
+    const match = key.match(/:(\d{4}-\d{2})$/)
+    if (match) {
+      months.add(match[1])
+    }
+  }
+  if (months.size > 0) {
+    await this.client.sadd('usage:model:monthly:months', ...months)
+    logger.info(`📅 迁移月份索引: ${months.size} 个月份 (${[...months].sort().join(', ')})`)
+  }
+
+  logger.success(
+    `✅ 迁移完成: ${keyIds.length} 个 API Key, ${total.requests} 请求, ${total.allTokens} tokens`
+  )
+  return { success: true, migrated: keyIds.length, total }
+}
+
+// 确保月份索引完整（后台检查，补充缺失的月份）
+redisClient.ensureMonthlyMonthsIndex = async function () {
+  // 扫描所有月份 key
+  const monthlyKeys = await this.client.keys('usage:model:monthly:*')
+  const allMonths = new Set()
+  for (const key of monthlyKeys) {
+    const match = key.match(/:(\d{4}-\d{2})$/)
+    if (match) {
+      allMonths.add(match[1])
+    }
+  }
+
+  if (allMonths.size === 0) {
+    return // 没有月份数据
+  }
+
+  // 获取索引中已有的月份
+  const existingMonths = await this.client.smembers('usage:model:monthly:months')
+  const existingSet = new Set(existingMonths)
+
+  // 找出缺失的月份
+  const missingMonths = [...allMonths].filter((m) => !existingSet.has(m))
+
+  if (missingMonths.length > 0) {
+    await this.client.sadd('usage:model:monthly:months', ...missingMonths)
+    logger.info(
+      `📅 补充月份索引: ${missingMonths.length} 个月份 (${missingMonths.sort().join(', ')})`
+    )
+  }
+}
+
+// 检查是否需要迁移
+redisClient.needsGlobalStatsMigration = async function () {
+  const exists = await this.client.exists('usage:global:total')
+  return exists === 0
+}
+
+// 获取已迁移版本
+redisClient.getMigratedVersion = async function () {
+  return (await this.client.get('system:migrated:version')) || '0.0.0'
+}
+
+// 设置已迁移版本
+redisClient.setMigratedVersion = async function (version) {
+  await this.client.set('system:migrated:version', version)
+}
+
+// 获取全局统计（用于 dashboard 快速查询）
+redisClient.getGlobalStats = async function () {
+  const stats = await this.client.hgetall('usage:global:total')
+  if (!stats || !stats.requests) {
+    return null
+  }
+  return {
+    requests: parseInt(stats.requests) || 0,
+    inputTokens: parseInt(stats.inputTokens) || 0,
+    outputTokens: parseInt(stats.outputTokens) || 0,
+    cacheCreateTokens: parseInt(stats.cacheCreateTokens) || 0,
+    cacheReadTokens: parseInt(stats.cacheReadTokens) || 0,
+    allTokens: parseInt(stats.allTokens) || 0
+  }
+}
+
+// 快速获取 API Key 计数（不拉全量数据）
+redisClient.getApiKeyCount = async function () {
+  const keyIds = await this.scanApiKeyIds()
+  if (!keyIds || keyIds.length === 0) {
+    return { total: 0, active: 0 }
+  }
+
+  // 批量获取 isActive 字段
+  const pipeline = this.client.pipeline()
+  keyIds.forEach((id) => pipeline.hget(`apikey:${id}`, 'isActive'))
+  const results = await pipeline.exec()
+
+  let active = 0
+  results.forEach(([err, val]) => {
+    if (!err && (val === 'true' || val === true)) {
+      active++
+    }
+  })
+  return { total: keyIds.length, active }
+}
+
+// 清理过期的系统分钟统计数据（启动时调用）
+redisClient.cleanupSystemMetrics = async function () {
+  logger.info('🧹 清理过期的系统分钟统计数据...')
+
+  const keys = await this.scanKeys('system:metrics:minute:*')
+  if (!keys || keys.length === 0) {
+    logger.info('📊 没有需要清理的系统分钟统计数据')
+    return { cleaned: 0 }
+  }
+
+  // 计算当前分钟时间戳和保留窗口
+  const metricsWindow = config.system?.metricsWindow || 5
+  const currentMinute = Math.floor(Date.now() / 60000)
+  const keepAfter = currentMinute - metricsWindow * 2 // 保留窗口的2倍
+
+  // 筛选需要删除的 key
+  const toDelete = keys.filter((key) => {
+    const match = key.match(/system:metrics:minute:(\d+)/)
+    if (!match) {
+      return false
+    }
+    const minute = parseInt(match[1])
+    return minute < keepAfter
+  })
+
+  if (toDelete.length === 0) {
+    logger.info('📊 没有过期的系统分钟统计数据')
+    return { cleaned: 0 }
+  }
+
+  // 分批删除
+  const batchSize = 1000
+  for (let i = 0; i < toDelete.length; i += batchSize) {
+    const batch = toDelete.slice(i, i + batchSize)
+    await this.client.del(...batch)
+  }
+
+  logger.success(`✅ 清理完成: 删除 ${toDelete.length} 个过期的系统分钟统计 key`)
+  return { cleaned: toDelete.length }
 }
 
 module.exports = redisClient

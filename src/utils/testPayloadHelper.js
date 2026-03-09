@@ -1,4 +1,11 @@
 const crypto = require('crypto')
+const { mapToErrorCode } = require('./errorSanitizer')
+
+// 将原始错误信息映射为安全的标准错误码消息
+const sanitizeErrorMsg = (msg) => {
+  const mapped = mapToErrorCode({ message: msg }, { logOriginal: false })
+  return `[${mapped.code}] ${mapped.message}`
+}
 
 /**
  * 生成随机十六进制字符串
@@ -24,9 +31,12 @@ function generateSessionString() {
  * @param {string} model - 模型名称
  * @param {object} options - 可选配置
  * @param {boolean} options.stream - 是否流式（默认false）
+ * @param {string} options.prompt - 自定义提示词（默认 'hi'）
+ * @param {number} options.maxTokens - 最大输出 token（默认 1000）
  * @returns {object} 测试请求体
  */
 function createClaudeTestPayload(model = 'claude-sonnet-4-5-20250929', options = {}) {
+  const { stream, prompt = 'hi', maxTokens = 1000 } = options
   const payload = {
     model,
     messages: [
@@ -35,7 +45,7 @@ function createClaudeTestPayload(model = 'claude-sonnet-4-5-20250929', options =
         content: [
           {
             type: 'text',
-            text: 'hi',
+            text: prompt,
             cache_control: {
               type: 'ephemeral'
             }
@@ -55,11 +65,11 @@ function createClaudeTestPayload(model = 'claude-sonnet-4-5-20250929', options =
     metadata: {
       user_id: generateSessionString()
     },
-    max_tokens: 21333,
+    max_tokens: maxTokens,
     temperature: 1
   }
 
-  if (options.stream) {
+  if (stream) {
     payload.stream = true
   }
 
@@ -89,7 +99,8 @@ async function sendStreamTestRequest(options) {
     payload = createClaudeTestPayload('claude-sonnet-4-5-20250929', { stream: true }),
     proxyAgent = null,
     timeout = 30000,
-    extraHeaders = {}
+    extraHeaders = {},
+    sanitize = false
   } = options
 
   const sendSSE = (type, data = {}) => {
@@ -135,7 +146,7 @@ async function sendStreamTestRequest(options) {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',
       'User-Agent': 'claude-cli/2.0.52 (external, cli)',
-      authorization,
+      ...(authorization ? { authorization } : {}),
       ...extraHeaders
     },
     timeout,
@@ -163,17 +174,17 @@ async function sendStreamTestRequest(options) {
           let errorMsg = `API Error: ${response.status}`
           try {
             const json = JSON.parse(errorData)
-            errorMsg = json.message || json.error?.message || json.error || errorMsg
+            errorMsg = extractErrorMessage(json, errorMsg)
           } catch {
             if (errorData.length < 200) {
               errorMsg = errorData || errorMsg
             }
           }
-          endTest(false, errorMsg)
+          endTest(false, sanitize ? sanitizeErrorMsg(errorMsg) : errorMsg)
           resolve()
         })
         response.data.on('error', (err) => {
-          endTest(false, err.message)
+          endTest(false, sanitize ? sanitizeErrorMsg(err.message) : err.message)
           resolve()
         })
       })
@@ -234,9 +245,120 @@ async function sendStreamTestRequest(options) {
   }
 }
 
+/**
+ * 生成 Gemini 测试请求体
+ * @param {string} model - 模型名称
+ * @param {object} options - 可选配置
+ * @param {string} options.prompt - 自定义提示词（默认 'hi'）
+ * @param {number} options.maxTokens - 最大输出 token（默认 100）
+ * @returns {object} 测试请求体
+ */
+function createGeminiTestPayload(_model = 'gemini-2.5-pro', options = {}) {
+  const { prompt = 'hi', maxTokens = 100 } = options
+  return {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: prompt }]
+      }
+    ],
+    generationConfig: {
+      maxOutputTokens: maxTokens,
+      temperature: 1
+    }
+  }
+}
+
+/**
+ * 生成 OpenAI Responses 测试请求体
+ * @param {string} model - 模型名称
+ * @param {object} options - 可选配置
+ * @param {string} options.prompt - 自定义提示词（默认 'hi'）
+ * @param {number} options.maxTokens - 最大输出 token（默认 100）
+ * @returns {object} 测试请求体
+ */
+function createOpenAITestPayload(model = 'gpt-5', options = {}) {
+  const { prompt = 'hi', maxTokens = 100, stream = true } = options
+  return {
+    model,
+    input: [
+      {
+        role: 'user',
+        content: prompt
+      }
+    ],
+    max_output_tokens: maxTokens,
+    stream
+  }
+}
+
+/**
+ * 生成 Chat Completions 测试请求体（用于 Azure OpenAI 等 Chat Completions 端点）
+ * @param {string} model - 模型名称
+ * @param {object} options - 可选配置
+ * @param {string} options.prompt - 自定义提示词（默认 'hi'）
+ * @param {number} options.maxTokens - 最大输出 token（默认 100）
+ * @returns {object} 测试请求体
+ */
+function createChatCompletionsTestPayload(model = 'gpt-4o-mini', options = {}) {
+  const { prompt = 'hi', maxTokens = 100 } = options
+  return {
+    model,
+    messages: [
+      {
+        role: 'user',
+        content: prompt
+      }
+    ],
+    max_tokens: maxTokens
+  }
+}
+
+/**
+ * 从各种格式的错误响应中提取可读错误信息
+ * 支持格式: {message}, {error:{message}}, {msg:{error:{message}}}, {error:"string"} 等
+ * @param {object} json - 解析后的 JSON 错误响应
+ * @param {string} fallback - 提取失败时的回退信息
+ * @returns {string} 错误信息
+ */
+function extractErrorMessage(json, fallback) {
+  if (!json || typeof json !== 'object') {
+    return fallback
+  }
+  // 直接 message
+  if (json.message && typeof json.message === 'string') {
+    return json.message
+  }
+  // {error: {message: "..."}}
+  if (json.error?.message) {
+    return json.error.message
+  }
+  // {msg: {error: {message: "..."}}} (relay 包装格式)
+  if (json.msg?.error?.message) {
+    return json.msg.error.message
+  }
+  if (json.msg?.message) {
+    return json.msg.message
+  }
+  // {error: "string"}
+  if (typeof json.error === 'string') {
+    return json.error
+  }
+  // {msg: "string"}
+  if (typeof json.msg === 'string') {
+    return json.msg
+  }
+  return fallback
+}
+
 module.exports = {
   randomHex,
   generateSessionString,
   createClaudeTestPayload,
+  createGeminiTestPayload,
+  createOpenAITestPayload,
+  createChatCompletionsTestPayload,
+  extractErrorMessage,
+  sanitizeErrorMsg,
   sendStreamTestRequest
 }

@@ -1,16 +1,17 @@
 const express = require('express')
 const apiKeyService = require('../../services/apiKeyService')
-const claudeAccountService = require('../../services/claudeAccountService')
-const claudeConsoleAccountService = require('../../services/claudeConsoleAccountService')
-const bedrockAccountService = require('../../services/bedrockAccountService')
-const ccrAccountService = require('../../services/ccrAccountService')
-const geminiAccountService = require('../../services/geminiAccountService')
-const droidAccountService = require('../../services/droidAccountService')
-const openaiResponsesAccountService = require('../../services/openaiResponsesAccountService')
+const claudeAccountService = require('../../services/account/claudeAccountService')
+const claudeConsoleAccountService = require('../../services/account/claudeConsoleAccountService')
+const bedrockAccountService = require('../../services/account/bedrockAccountService')
+const ccrAccountService = require('../../services/account/ccrAccountService')
+const geminiAccountService = require('../../services/account/geminiAccountService')
+const droidAccountService = require('../../services/account/droidAccountService')
+const openaiResponsesAccountService = require('../../services/account/openaiResponsesAccountService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const CostCalculator = require('../../utils/costCalculator')
+const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const config = require('../../../config/config')
 
 const router = express.Router()
@@ -20,9 +21,14 @@ const router = express.Router()
 // 获取系统概览
 router.get('/dashboard', authenticateAdmin, async (req, res) => {
   try {
+    // 先检查是否有全局预聚合数据
+    const globalStats = await redis.getGlobalStats()
+
+    // 根据是否有全局统计决定查询策略
+    let apiKeys = null
+    let apiKeyCount = null
+
     const [
-      ,
-      apiKeys,
       claudeAccounts,
       claudeConsoleAccounts,
       geminiAccounts,
@@ -35,8 +41,6 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       systemAverages,
       realtimeMetrics
     ] = await Promise.all([
-      redis.getSystemStats(),
-      apiKeyService.getAllApiKeys(),
       claudeAccountService.getAllAccounts(),
       claudeConsoleAccountService.getAllAccounts(),
       geminiAccountService.getAllAccounts(),
@@ -49,6 +53,13 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       redis.getSystemAverages(),
       redis.getRealtimeSystemMetrics()
     ])
+
+    // 有全局统计时只获取计数，否则拉全量
+    if (globalStats) {
+      apiKeyCount = await redis.getApiKeyCount()
+    } else {
+      apiKeys = await apiKeyService.getAllApiKeysFast()
+    }
 
     // 处理Bedrock账户数据
     const bedrockAccounts = bedrockAccountsResult.success ? bedrockAccountsResult.data : []
@@ -66,250 +77,118 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       return false
     }
 
-    const normalDroidAccounts = droidAccounts.filter(
-      (acc) =>
-        normalizeBoolean(acc.isActive) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        normalizeBoolean(acc.schedulable) &&
-        !isRateLimitedFlag(acc.rateLimitStatus)
-    ).length
-    const abnormalDroidAccounts = droidAccounts.filter(
-      (acc) =>
-        !normalizeBoolean(acc.isActive) || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedDroidAccounts = droidAccounts.filter(
-      (acc) =>
-        !normalizeBoolean(acc.schedulable) &&
-        normalizeBoolean(acc.isActive) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedDroidAccounts = droidAccounts.filter((acc) =>
-      isRateLimitedFlag(acc.rateLimitStatus)
-    ).length
+    // 通用账户统计函数 - 单次遍历完成所有统计
+    const countAccountStats = (accounts, opts = {}) => {
+      const { isStringType = false, checkGeminiRateLimit = false } = opts
+      let normal = 0,
+        abnormal = 0,
+        paused = 0,
+        rateLimited = 0
 
-    // 计算使用统计（统一使用allTokens）
-    const totalTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.allTokens || 0),
-      0
-    )
-    const totalRequestsUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.requests || 0),
-      0
-    )
-    const totalInputTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.inputTokens || 0),
-      0
-    )
-    const totalOutputTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.outputTokens || 0),
-      0
-    )
-    const totalCacheCreateTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.cacheCreateTokens || 0),
-      0
-    )
-    const totalCacheReadTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.cacheReadTokens || 0),
-      0
-    )
-    const totalAllTokensUsed = apiKeys.reduce(
-      (sum, key) => sum + (key.usage?.total?.allTokens || 0),
-      0
-    )
+      for (const acc of accounts) {
+        const isActive = isStringType
+          ? acc.isActive === 'true' ||
+            acc.isActive === true ||
+            (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)
+          : acc.isActive
+        const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
+        const isSchedulable = isStringType
+          ? acc.schedulable !== 'false' && acc.schedulable !== false
+          : acc.schedulable !== false
+        const isRateLimited = checkGeminiRateLimit
+          ? acc.rateLimitStatus === 'limited' ||
+            (acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
+          : acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
 
-    const activeApiKeys = apiKeys.filter((key) => key.isActive).length
+        if (!isActive || isBlocked) {
+          abnormal++
+        } else if (!isSchedulable) {
+          paused++
+        } else if (isRateLimited) {
+          rateLimited++
+        } else {
+          normal++
+        }
+      }
+      return { normal, abnormal, paused, rateLimited }
+    }
 
-    // Claude账户统计 - 根据账户管理页面的判断逻辑
-    const normalClaudeAccounts = claudeAccounts.filter(
-      (acc) =>
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== false &&
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalClaudeAccounts = claudeAccounts.filter(
-      (acc) => !acc.isActive || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedClaudeAccounts = claudeAccounts.filter(
-      (acc) =>
-        acc.schedulable === false &&
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedClaudeAccounts = claudeAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
+    // Droid 账户统计（特殊逻辑）
+    let normalDroidAccounts = 0,
+      abnormalDroidAccounts = 0,
+      pausedDroidAccounts = 0,
+      rateLimitedDroidAccounts = 0
+    for (const acc of droidAccounts) {
+      const isActive = normalizeBoolean(acc.isActive)
+      const isBlocked = acc.status === 'blocked' || acc.status === 'unauthorized'
+      const isSchedulable = normalizeBoolean(acc.schedulable)
+      const isRateLimited = isRateLimitedFlag(acc.rateLimitStatus)
 
-    // Claude Console账户统计
-    const normalClaudeConsoleAccounts = claudeConsoleAccounts.filter(
-      (acc) =>
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== false &&
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalClaudeConsoleAccounts = claudeConsoleAccounts.filter(
-      (acc) => !acc.isActive || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedClaudeConsoleAccounts = claudeConsoleAccounts.filter(
-      (acc) =>
-        acc.schedulable === false &&
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedClaudeConsoleAccounts = claudeConsoleAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
+      if (!isActive || isBlocked) {
+        abnormalDroidAccounts++
+      } else if (!isSchedulable) {
+        pausedDroidAccounts++
+      } else if (isRateLimited) {
+        rateLimitedDroidAccounts++
+      } else {
+        normalDroidAccounts++
+      }
+    }
 
-    // Gemini账户统计
-    const normalGeminiAccounts = geminiAccounts.filter(
-      (acc) =>
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== false &&
-        !(
-          acc.rateLimitStatus === 'limited' ||
-          (acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-        )
-    ).length
-    const abnormalGeminiAccounts = geminiAccounts.filter(
-      (acc) => !acc.isActive || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedGeminiAccounts = geminiAccounts.filter(
-      (acc) =>
-        acc.schedulable === false &&
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedGeminiAccounts = geminiAccounts.filter(
-      (acc) =>
-        acc.rateLimitStatus === 'limited' ||
-        (acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
+    // 计算使用统计
+    let totalTokensUsed = 0,
+      totalRequestsUsed = 0,
+      totalInputTokensUsed = 0,
+      totalOutputTokensUsed = 0,
+      totalCacheCreateTokensUsed = 0,
+      totalCacheReadTokensUsed = 0,
+      totalAllTokensUsed = 0,
+      activeApiKeys = 0,
+      totalApiKeys = 0
 
-    // Bedrock账户统计
-    const normalBedrockAccounts = bedrockAccounts.filter(
-      (acc) =>
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== false &&
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalBedrockAccounts = bedrockAccounts.filter(
-      (acc) => !acc.isActive || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedBedrockAccounts = bedrockAccounts.filter(
-      (acc) =>
-        acc.schedulable === false &&
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedBedrockAccounts = bedrockAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
+    if (globalStats) {
+      // 使用预聚合数据（快速路径）
+      totalRequestsUsed = globalStats.requests
+      totalInputTokensUsed = globalStats.inputTokens
+      totalOutputTokensUsed = globalStats.outputTokens
+      totalCacheCreateTokensUsed = globalStats.cacheCreateTokens
+      totalCacheReadTokensUsed = globalStats.cacheReadTokens
+      totalAllTokensUsed = globalStats.allTokens
+      totalTokensUsed = totalAllTokensUsed
+      totalApiKeys = apiKeyCount.total
+      activeApiKeys = apiKeyCount.active
+    } else {
+      // 回退到遍历（兼容旧数据）
+      totalApiKeys = apiKeys.length
+      for (const key of apiKeys) {
+        const usage = key.usage?.total
+        if (usage) {
+          totalTokensUsed += usage.allTokens || 0
+          totalRequestsUsed += usage.requests || 0
+          totalInputTokensUsed += usage.inputTokens || 0
+          totalOutputTokensUsed += usage.outputTokens || 0
+          totalCacheCreateTokensUsed += usage.cacheCreateTokens || 0
+          totalCacheReadTokensUsed += usage.cacheReadTokens || 0
+          totalAllTokensUsed += usage.allTokens || 0
+        }
+        if (key.isActive) {
+          activeApiKeys++
+        }
+      }
+    }
 
-    // OpenAI账户统计
-    // 注意：OpenAI账户的isActive和schedulable是字符串类型，默认值为'true'
-    const normalOpenAIAccounts = openaiAccounts.filter(
-      (acc) =>
-        (acc.isActive === 'true' ||
-          acc.isActive === true ||
-          (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== 'false' &&
-        acc.schedulable !== false && // 包括'true'、true和undefined
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalOpenAIAccounts = openaiAccounts.filter(
-      (acc) =>
-        acc.isActive === 'false' ||
-        acc.isActive === false ||
-        acc.status === 'blocked' ||
-        acc.status === 'unauthorized'
-    ).length
-    const pausedOpenAIAccounts = openaiAccounts.filter(
-      (acc) =>
-        (acc.schedulable === 'false' || acc.schedulable === false) &&
-        (acc.isActive === 'true' ||
-          acc.isActive === true ||
-          (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedOpenAIAccounts = openaiAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
-
-    // CCR账户统计
-    const normalCcrAccounts = ccrAccounts.filter(
-      (acc) =>
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== false &&
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalCcrAccounts = ccrAccounts.filter(
-      (acc) => !acc.isActive || acc.status === 'blocked' || acc.status === 'unauthorized'
-    ).length
-    const pausedCcrAccounts = ccrAccounts.filter(
-      (acc) =>
-        acc.schedulable === false &&
-        acc.isActive &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedCcrAccounts = ccrAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
-
-    // OpenAI-Responses账户统计
-    // 注意：OpenAI-Responses账户的isActive和schedulable也是字符串类型
-    const normalOpenAIResponsesAccounts = openaiResponsesAccounts.filter(
-      (acc) =>
-        (acc.isActive === 'true' ||
-          acc.isActive === true ||
-          (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized' &&
-        acc.schedulable !== 'false' &&
-        acc.schedulable !== false &&
-        !(acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited)
-    ).length
-    const abnormalOpenAIResponsesAccounts = openaiResponsesAccounts.filter(
-      (acc) =>
-        acc.isActive === 'false' ||
-        acc.isActive === false ||
-        acc.status === 'blocked' ||
-        acc.status === 'unauthorized'
-    ).length
-    const pausedOpenAIResponsesAccounts = openaiResponsesAccounts.filter(
-      (acc) =>
-        (acc.schedulable === 'false' || acc.schedulable === false) &&
-        (acc.isActive === 'true' ||
-          acc.isActive === true ||
-          (!acc.isActive && acc.isActive !== 'false' && acc.isActive !== false)) &&
-        acc.status !== 'blocked' &&
-        acc.status !== 'unauthorized'
-    ).length
-    const rateLimitedOpenAIResponsesAccounts = openaiResponsesAccounts.filter(
-      (acc) => acc.rateLimitStatus && acc.rateLimitStatus.isRateLimited
-    ).length
+    // 各平台账户统计（单次遍历）
+    const claudeStats = countAccountStats(claudeAccounts)
+    const claudeConsoleStats = countAccountStats(claudeConsoleAccounts)
+    const geminiStats = countAccountStats(geminiAccounts, { checkGeminiRateLimit: true })
+    const bedrockStats = countAccountStats(bedrockAccounts)
+    const openaiStats = countAccountStats(openaiAccounts, { isStringType: true })
+    const ccrStats = countAccountStats(ccrAccounts)
+    const openaiResponsesStats = countAccountStats(openaiResponsesAccounts, { isStringType: true })
 
     const dashboard = {
       overview: {
-        totalApiKeys: apiKeys.length,
+        totalApiKeys,
         activeApiKeys,
         // 总账户统计（所有平台）
         totalAccounts:
@@ -321,90 +200,90 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
           openaiResponsesAccounts.length +
           ccrAccounts.length,
         normalAccounts:
-          normalClaudeAccounts +
-          normalClaudeConsoleAccounts +
-          normalGeminiAccounts +
-          normalBedrockAccounts +
-          normalOpenAIAccounts +
-          normalOpenAIResponsesAccounts +
-          normalCcrAccounts,
+          claudeStats.normal +
+          claudeConsoleStats.normal +
+          geminiStats.normal +
+          bedrockStats.normal +
+          openaiStats.normal +
+          openaiResponsesStats.normal +
+          ccrStats.normal,
         abnormalAccounts:
-          abnormalClaudeAccounts +
-          abnormalClaudeConsoleAccounts +
-          abnormalGeminiAccounts +
-          abnormalBedrockAccounts +
-          abnormalOpenAIAccounts +
-          abnormalOpenAIResponsesAccounts +
-          abnormalCcrAccounts +
+          claudeStats.abnormal +
+          claudeConsoleStats.abnormal +
+          geminiStats.abnormal +
+          bedrockStats.abnormal +
+          openaiStats.abnormal +
+          openaiResponsesStats.abnormal +
+          ccrStats.abnormal +
           abnormalDroidAccounts,
         pausedAccounts:
-          pausedClaudeAccounts +
-          pausedClaudeConsoleAccounts +
-          pausedGeminiAccounts +
-          pausedBedrockAccounts +
-          pausedOpenAIAccounts +
-          pausedOpenAIResponsesAccounts +
-          pausedCcrAccounts +
+          claudeStats.paused +
+          claudeConsoleStats.paused +
+          geminiStats.paused +
+          bedrockStats.paused +
+          openaiStats.paused +
+          openaiResponsesStats.paused +
+          ccrStats.paused +
           pausedDroidAccounts,
         rateLimitedAccounts:
-          rateLimitedClaudeAccounts +
-          rateLimitedClaudeConsoleAccounts +
-          rateLimitedGeminiAccounts +
-          rateLimitedBedrockAccounts +
-          rateLimitedOpenAIAccounts +
-          rateLimitedOpenAIResponsesAccounts +
-          rateLimitedCcrAccounts +
+          claudeStats.rateLimited +
+          claudeConsoleStats.rateLimited +
+          geminiStats.rateLimited +
+          bedrockStats.rateLimited +
+          openaiStats.rateLimited +
+          openaiResponsesStats.rateLimited +
+          ccrStats.rateLimited +
           rateLimitedDroidAccounts,
         // 各平台详细统计
         accountsByPlatform: {
           claude: {
             total: claudeAccounts.length,
-            normal: normalClaudeAccounts,
-            abnormal: abnormalClaudeAccounts,
-            paused: pausedClaudeAccounts,
-            rateLimited: rateLimitedClaudeAccounts
+            normal: claudeStats.normal,
+            abnormal: claudeStats.abnormal,
+            paused: claudeStats.paused,
+            rateLimited: claudeStats.rateLimited
           },
           'claude-console': {
             total: claudeConsoleAccounts.length,
-            normal: normalClaudeConsoleAccounts,
-            abnormal: abnormalClaudeConsoleAccounts,
-            paused: pausedClaudeConsoleAccounts,
-            rateLimited: rateLimitedClaudeConsoleAccounts
+            normal: claudeConsoleStats.normal,
+            abnormal: claudeConsoleStats.abnormal,
+            paused: claudeConsoleStats.paused,
+            rateLimited: claudeConsoleStats.rateLimited
           },
           gemini: {
             total: geminiAccounts.length,
-            normal: normalGeminiAccounts,
-            abnormal: abnormalGeminiAccounts,
-            paused: pausedGeminiAccounts,
-            rateLimited: rateLimitedGeminiAccounts
+            normal: geminiStats.normal,
+            abnormal: geminiStats.abnormal,
+            paused: geminiStats.paused,
+            rateLimited: geminiStats.rateLimited
           },
           bedrock: {
             total: bedrockAccounts.length,
-            normal: normalBedrockAccounts,
-            abnormal: abnormalBedrockAccounts,
-            paused: pausedBedrockAccounts,
-            rateLimited: rateLimitedBedrockAccounts
+            normal: bedrockStats.normal,
+            abnormal: bedrockStats.abnormal,
+            paused: bedrockStats.paused,
+            rateLimited: bedrockStats.rateLimited
           },
           openai: {
             total: openaiAccounts.length,
-            normal: normalOpenAIAccounts,
-            abnormal: abnormalOpenAIAccounts,
-            paused: pausedOpenAIAccounts,
-            rateLimited: rateLimitedOpenAIAccounts
+            normal: openaiStats.normal,
+            abnormal: openaiStats.abnormal,
+            paused: openaiStats.paused,
+            rateLimited: openaiStats.rateLimited
           },
           ccr: {
             total: ccrAccounts.length,
-            normal: normalCcrAccounts,
-            abnormal: abnormalCcrAccounts,
-            paused: pausedCcrAccounts,
-            rateLimited: rateLimitedCcrAccounts
+            normal: ccrStats.normal,
+            abnormal: ccrStats.abnormal,
+            paused: ccrStats.paused,
+            rateLimited: ccrStats.rateLimited
           },
           'openai-responses': {
             total: openaiResponsesAccounts.length,
-            normal: normalOpenAIResponsesAccounts,
-            abnormal: abnormalOpenAIResponsesAccounts,
-            paused: pausedOpenAIResponsesAccounts,
-            rateLimited: rateLimitedOpenAIResponsesAccounts
+            normal: openaiResponsesStats.normal,
+            abnormal: openaiResponsesStats.abnormal,
+            paused: openaiResponsesStats.paused,
+            rateLimited: openaiResponsesStats.rateLimited
           },
           droid: {
             total: droidAccounts.length,
@@ -416,20 +295,20 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
         },
         // 保留旧字段以兼容
         activeAccounts:
-          normalClaudeAccounts +
-          normalClaudeConsoleAccounts +
-          normalGeminiAccounts +
-          normalBedrockAccounts +
-          normalOpenAIAccounts +
-          normalOpenAIResponsesAccounts +
-          normalCcrAccounts +
+          claudeStats.normal +
+          claudeConsoleStats.normal +
+          geminiStats.normal +
+          bedrockStats.normal +
+          openaiStats.normal +
+          openaiResponsesStats.normal +
+          ccrStats.normal +
           normalDroidAccounts,
         totalClaudeAccounts: claudeAccounts.length + claudeConsoleAccounts.length,
-        activeClaudeAccounts: normalClaudeAccounts + normalClaudeConsoleAccounts,
-        rateLimitedClaudeAccounts: rateLimitedClaudeAccounts + rateLimitedClaudeConsoleAccounts,
+        activeClaudeAccounts: claudeStats.normal + claudeConsoleStats.normal,
+        rateLimitedClaudeAccounts: claudeStats.rateLimited + claudeConsoleStats.rateLimited,
         totalGeminiAccounts: geminiAccounts.length,
-        activeGeminiAccounts: normalGeminiAccounts,
-        rateLimitedGeminiAccounts,
+        activeGeminiAccounts: geminiStats.normal,
+        rateLimitedGeminiAccounts: geminiStats.rateLimited,
         totalTokensUsed,
         totalRequestsUsed,
         totalInputTokensUsed,
@@ -459,8 +338,8 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
       },
       systemHealth: {
         redisConnected: redis.isConnected,
-        claudeAccountsHealthy: normalClaudeAccounts + normalClaudeConsoleAccounts > 0,
-        geminiAccountsHealthy: normalGeminiAccounts > 0,
+        claudeAccountsHealthy: claudeStats.normal + claudeConsoleStats.normal > 0,
+        geminiAccountsHealthy: geminiStats.normal > 0,
         droidAccountsHealthy: normalDroidAccounts > 0,
         uptime: process.uptime()
       },
@@ -474,13 +353,24 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
   }
 })
 
+// 获取所有临时不可用账户状态
+router.get('/temp-unavailable', authenticateAdmin, async (req, res) => {
+  try {
+    const statuses = await upstreamErrorHelper.getAllTempUnavailable()
+    return res.json({ success: true, data: statuses })
+  } catch (error) {
+    logger.error('❌ Failed to get temp unavailable statuses:', error)
+    return res.status(500).json({ error: 'Failed to get temp unavailable statuses' })
+  }
+})
+
 // 获取使用统计
 router.get('/usage-stats', authenticateAdmin, async (req, res) => {
   try {
     const { period = 'daily' } = req.query // daily, monthly
 
     // 获取基础API Key统计
-    const apiKeys = await apiKeyService.getAllApiKeys()
+    const apiKeys = await apiKeyService.getAllApiKeysFast()
 
     const stats = apiKeys.map((key) => ({
       keyId: key.id,
@@ -510,55 +400,48 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
       `📊 Getting global model stats, period: ${period}, startDate: ${startDate}, endDate: ${endDate}, today: ${today}, currentMonth: ${currentMonth}`
     )
 
-    const client = redis.getClientSafe()
-
-    // 获取所有模型的统计数据
-    let searchPatterns = []
+    // 收集所有需要扫描的日期
+    const datePatterns = []
 
     if (startDate && endDate) {
-      // 自定义日期范围，生成多个日期的搜索模式
+      // 自定义日期范围
       const start = new Date(startDate)
       const end = new Date(endDate)
 
-      // 确保日期范围有效
       if (start > end) {
         return res.status(400).json({ error: 'Start date must be before or equal to end date' })
       }
 
-      // 限制最大范围为365天
       const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1
       if (daysDiff > 365) {
         return res.status(400).json({ error: 'Date range cannot exceed 365 days' })
       }
 
-      // 生成日期范围内所有日期的搜索模式
       const currentDate = new Date(start)
       while (currentDate <= end) {
         const dateStr = redis.getDateStringInTimezone(currentDate)
-        searchPatterns.push(`usage:model:daily:*:${dateStr}`)
+        datePatterns.push({ dateStr, pattern: `usage:model:daily:*:${dateStr}` })
         currentDate.setDate(currentDate.getDate() + 1)
       }
 
-      logger.info(`📊 Generated ${searchPatterns.length} search patterns for date range`)
+      logger.info(`📊 Generated ${datePatterns.length} search patterns for date range`)
     } else {
       // 使用默认的period
       const pattern =
         period === 'daily'
           ? `usage:model:daily:*:${today}`
           : `usage:model:monthly:*:${currentMonth}`
-      searchPatterns = [pattern]
+      datePatterns.push({ dateStr: period === 'daily' ? today : currentMonth, pattern })
     }
 
-    logger.info('📊 Searching patterns:', searchPatterns)
-
-    // 获取所有匹配的keys
-    const allKeys = []
-    for (const pattern of searchPatterns) {
-      const keys = await client.keys(pattern)
-      allKeys.push(...keys)
+    // 按日期集合扫描，串行避免并行触发多次全库 SCAN
+    const allResults = []
+    for (const { pattern } of datePatterns) {
+      const results = await redis.scanAndGetAllChunked(pattern)
+      allResults.push(...results)
     }
 
-    logger.info(`📊 Found ${allKeys.length} matching keys in total`)
+    logger.info(`📊 Found ${allResults.length} matching keys in total`)
 
     // 模型名标准化函数（与redis.js保持一致）
     const normalizeModelName = (model) => {
@@ -568,23 +451,23 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
 
       // 对于Bedrock模型，去掉区域前缀进行统一
       if (model.includes('.anthropic.') || model.includes('.claude')) {
-        // 匹配所有AWS区域格式：region.anthropic.model-name-v1:0 -> claude-model-name
-        // 支持所有AWS区域格式，如：us-east-1, eu-west-1, ap-southeast-1, ca-central-1等
-        let normalized = model.replace(/^[a-z0-9-]+\./, '') // 去掉任何区域前缀（更通用）
-        normalized = normalized.replace('anthropic.', '') // 去掉anthropic前缀
-        normalized = normalized.replace(/-v\d+:\d+$/, '') // 去掉版本后缀（如-v1:0, -v2:1等）
+        let normalized = model.replace(/^[a-z0-9-]+\./, '')
+        normalized = normalized.replace('anthropic.', '')
+        normalized = normalized.replace(/-v\d+:\d+$/, '')
         return normalized
       }
 
-      // 对于其他模型，去掉常见的版本后缀
       return model.replace(/-v\d+:\d+$|:latest$/, '')
     }
 
     // 聚合相同模型的数据
     const modelStatsMap = new Map()
 
-    for (const key of allKeys) {
-      const match = key.match(/usage:model:daily:(.+):\d{4}-\d{2}-\d{2}$/)
+    for (const { key, data } of allResults) {
+      // 支持 daily 和 monthly 两种格式
+      const match =
+        key.match(/usage:model:daily:(.+):\d{4}-\d{2}-\d{2}$/) ||
+        key.match(/usage:model:monthly:(.+):\d{4}-\d{2}$/)
 
       if (!match) {
         logger.warn(`📊 Pattern mismatch for key: ${key}`)
@@ -593,7 +476,6 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
 
       const rawModel = match[1]
       const normalizedModel = normalizeModelName(rawModel)
-      const data = await client.hgetall(key)
 
       if (data && Object.keys(data).length > 0) {
         const stats = modelStatsMap.get(normalizedModel) || {
@@ -602,7 +484,9 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
           outputTokens: 0,
           cacheCreateTokens: 0,
           cacheReadTokens: 0,
-          allTokens: 0
+          allTokens: 0,
+          ephemeral5mTokens: 0,
+          ephemeral1hTokens: 0
         }
 
         stats.requests += parseInt(data.requests) || 0
@@ -611,6 +495,8 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         stats.cacheCreateTokens += parseInt(data.cacheCreateTokens) || 0
         stats.cacheReadTokens += parseInt(data.cacheReadTokens) || 0
         stats.allTokens += parseInt(data.allTokens) || 0
+        stats.ephemeral5mTokens += parseInt(data.ephemeral5mTokens) || 0
+        stats.ephemeral1hTokens += parseInt(data.ephemeral1hTokens) || 0
 
         modelStatsMap.set(normalizedModel, stats)
       }
@@ -625,6 +511,14 @@ router.get('/model-stats', authenticateAdmin, async (req, res) => {
         output_tokens: stats.outputTokens,
         cache_creation_input_tokens: stats.cacheCreateTokens,
         cache_read_input_tokens: stats.cacheReadTokens
+      }
+
+      // 如果有 ephemeral 5m/1h 拆分数据，添加 cache_creation 子对象以实现精确计费
+      if (stats.ephemeral5mTokens > 0 || stats.ephemeral1hTokens > 0) {
+        usage.cache_creation = {
+          ephemeral_5m_input_tokens: stats.ephemeral5mTokens,
+          ephemeral_1h_input_tokens: stats.ephemeral1hTokens
+        }
       }
 
       // 计算费用

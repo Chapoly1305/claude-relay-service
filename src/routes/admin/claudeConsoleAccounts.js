@@ -6,8 +6,8 @@
 const express = require('express')
 const router = express.Router()
 
-const claudeConsoleAccountService = require('../../services/claudeConsoleAccountService')
-const claudeConsoleRelayService = require('../../services/claudeConsoleRelayService')
+const claudeConsoleAccountService = require('../../services/account/claudeConsoleAccountService')
+const claudeConsoleRelayService = require('../../services/relay/claudeConsoleRelayService')
 const accountGroupService = require('../../services/accountGroupService')
 const apiKeyService = require('../../services/apiKeyService')
 const redis = require('../../models/redis')
@@ -441,7 +441,7 @@ router.post(
       const { accountId } = req.params
       await claudeConsoleAccountService.resetDailyUsage(accountId)
 
-      logger.success(`✅ Admin manually reset daily usage for Claude Console account: ${accountId}`)
+      logger.success(`Admin manually reset daily usage for Claude Console account: ${accountId}`)
       return res.json({ success: true, message: 'Daily usage reset successfully' })
     } catch (error) {
       logger.error('❌ Failed to reset Claude Console account daily usage:', error)
@@ -458,7 +458,7 @@ router.post(
     try {
       const { accountId } = req.params
       const result = await claudeConsoleAccountService.resetAccountStatus(accountId)
-      logger.success(`✅ Admin reset status for Claude Console account: ${accountId}`)
+      logger.success(`Admin reset status for Claude Console account: ${accountId}`)
       return res.json({ success: true, data: result })
     } catch (error) {
       logger.error('❌ Failed to reset Claude Console account status:', error)
@@ -472,7 +472,7 @@ router.post('/claude-console-accounts/reset-all-usage', authenticateAdmin, async
   try {
     await claudeConsoleAccountService.resetAllDailyUsage()
 
-    logger.success('✅ Admin manually reset daily usage for all Claude Console accounts')
+    logger.success('Admin manually reset daily usage for all Claude Console accounts')
     return res.json({ success: true, message: 'All daily usage reset successfully' })
   } catch (error) {
     logger.error('❌ Failed to reset all Claude Console accounts daily usage:', error)
@@ -485,10 +485,15 @@ router.post('/claude-console-accounts/reset-all-usage', authenticateAdmin, async
 // 测试Claude Console账户连通性（流式响应）- 复用 claudeConsoleRelayService
 router.post('/claude-console-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
   const { accountId } = req.params
+  const model = typeof req.body?.model === 'string' ? req.body.model.trim() : ''
+
+  if (!model) {
+    return res.status(400).json({ error: 'model is required' })
+  }
 
   try {
     // 直接调用服务层的测试方法
-    await claudeConsoleRelayService.testAccountConnection(accountId, res)
+    await claudeConsoleRelayService.testAccountConnection(accountId, res, model)
   } catch (error) {
     logger.error(`❌ Failed to test Claude Console account:`, error)
     // 错误已在服务层处理，这里仅做日志记录

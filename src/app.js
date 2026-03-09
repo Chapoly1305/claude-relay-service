@@ -11,6 +11,7 @@ const logger = require('./utils/logger')
 const redis = require('./models/redis')
 const pricingService = require('./services/pricingService')
 const cacheMonitor = require('./utils/cacheMonitor')
+const { getSafeMessage } = require('./utils/errorSanitizer')
 
 // Import routes
 const apiRoutes = require('./routes/api')
@@ -50,11 +51,42 @@ class Application {
       // 🔗 连接Redis
       logger.info('🔄 Connecting to Redis...')
       await redis.connect()
-      logger.success('✅ Redis connected successfully')
+      logger.success('Redis connected successfully')
+
+      // 📊 检查数据迁移（版本 > 1.1.250 时执行）
+      const { getAppVersion, versionGt } = require('./utils/commonHelper')
+      const currentVersion = getAppVersion()
+      const migratedVersion = await redis.getMigratedVersion()
+      if (versionGt(currentVersion, '1.1.250') && versionGt(currentVersion, migratedVersion)) {
+        logger.info(`🔄 检测到新版本 ${currentVersion}，检查数据迁移...`)
+        try {
+          if (await redis.needsGlobalStatsMigration()) {
+            await redis.migrateGlobalStats()
+          }
+          await redis.cleanupSystemMetrics() // 清理过期的系统分钟统计
+        } catch (err) {
+          logger.error('⚠️ 数据迁移出错，但不影响启动:', err.message)
+        }
+        await redis.setMigratedVersion(currentVersion)
+        logger.success(`✅ 数据迁移完成，版本: ${currentVersion}`)
+      }
+
+      // 📅 后台检查月份索引完整性（不阻塞启动）
+      redis.ensureMonthlyMonthsIndex().catch((err) => {
+        logger.error('📅 月份索引检查失败:', err.message)
+      })
+
+      // 📊 后台异步迁移 usage 索引（不阻塞启动）
+      redis.migrateUsageIndex().catch((err) => {
+        logger.error('📊 Background usage index migration failed:', err)
+      })
+
+      // 📊 迁移 alltime 模型统计（阻塞式，确保数据完整）
+      await redis.migrateAlltimeModelStats()
 
       // 💳 初始化账户余额查询服务（Provider 注册）
       try {
-        const accountBalanceService = require('./services/accountBalanceService')
+        const accountBalanceService = require('./services/account/accountBalanceService')
         const { registerAllProviders } = require('./services/balanceProviders')
         registerAllProviders(accountBalanceService)
         logger.info('✅ 账户余额查询服务已初始化')
@@ -94,15 +126,36 @@ class Application {
         )
       }
 
+      // 💰 启动回填：本周 Claude 周费用（用于 API Key 维度周限额）
+      try {
+        logger.info('💰 Backfilling current-week Claude weekly cost...')
+        const weeklyClaudeCostInitService = require('./services/weeklyClaudeCostInitService')
+        await weeklyClaudeCostInitService.backfillCurrentWeekClaudeCosts()
+      } catch (error) {
+        logger.warn('⚠️ Weekly Claude cost backfill failed (startup continues):', error.message)
+      }
+
       // 🕐 初始化Claude账户会话窗口
       logger.info('🕐 Initializing Claude account session windows...')
-      const claudeAccountService = require('./services/claudeAccountService')
+      const claudeAccountService = require('./services/account/claudeAccountService')
       await claudeAccountService.initializeSessionWindows()
 
       // 📊 初始化费用排序索引服务
       logger.info('📊 Initializing cost rank service...')
       const costRankService = require('./services/costRankService')
       await costRankService.initialize()
+
+      // 🔍 初始化 API Key 索引服务（用于分页查询优化）
+      logger.info('🔍 Initializing API Key index service...')
+      const apiKeyIndexService = require('./services/apiKeyIndexService')
+      apiKeyIndexService.init(redis)
+      await apiKeyIndexService.checkAndRebuild()
+
+      // 📁 确保账户分组反向索引存在（后台执行，不阻塞启动）
+      const accountGroupService = require('./services/accountGroupService')
+      accountGroupService.ensureReverseIndexes().catch((err) => {
+        logger.error('📁 Account group reverse index migration failed:', err)
+      })
 
       // 超早期拦截 /admin-next/ 请求 - 在所有中间件之前
       this.app.use((req, res, next) => {
@@ -377,7 +430,7 @@ class Application {
           logger.error('❌ Health check failed:', { error: error.message, stack: error.stack })
           res.status(503).json({
             status: 'unhealthy',
-            error: error.message,
+            error: getSafeMessage(error),
             timestamp: new Date().toISOString()
           })
         }
@@ -413,7 +466,7 @@ class Application {
       // 🚨 错误处理
       this.app.use(errorHandler)
 
-      logger.success('✅ Application initialized successfully')
+      logger.success('Application initialized successfully')
     } catch (error) {
       logger.error('💥 Application initialization failed:', error)
       throw error
@@ -448,7 +501,7 @@ class Application {
 
       await redis.setSession('admin_credentials', adminCredentials)
 
-      logger.success('✅ Admin credentials loaded from init.json (single source of truth)')
+      logger.success('Admin credentials loaded from init.json (single source of truth)')
       logger.info(`📋 Admin username: ${adminCredentials.username}`)
     } catch (error) {
       logger.error('❌ Failed to initialize admin credentials:', {
@@ -465,22 +518,24 @@ class Application {
       const client = redis.getClient()
 
       // 获取所有 session:* 键
-      const sessionKeys = await client.keys('session:*')
+      const sessionKeys = await redis.scanKeys('session:*')
+      const dataList = await redis.batchHgetallChunked(sessionKeys)
 
       let validCount = 0
       let invalidCount = 0
 
-      for (const key of sessionKeys) {
+      for (let i = 0; i < sessionKeys.length; i++) {
+        const key = sessionKeys[i]
         // 跳过 admin_credentials（系统凭据）
         if (key === 'session:admin_credentials') {
           continue
         }
 
-        const sessionData = await client.hgetall(key)
+        const sessionData = dataList[i]
 
         // 检查会话完整性：必须有 username 和 loginTime
-        const hasUsername = !!sessionData.username
-        const hasLoginTime = !!sessionData.loginTime
+        const hasUsername = !!sessionData?.username
+        const hasLoginTime = !!sessionData?.loginTime
 
         if (!hasUsername || !hasLoginTime) {
           // 无效会话 - 可能是漏洞利用创建的伪造会话
@@ -495,11 +550,11 @@ class Application {
       }
 
       if (invalidCount > 0) {
-        logger.security(`🔒 Startup security check: Removed ${invalidCount} invalid sessions`)
+        logger.security(`Startup security check: Removed ${invalidCount} invalid sessions`)
       }
 
       logger.success(
-        `✅ Session cleanup completed: ${validCount} valid, ${invalidCount} invalid removed`
+        `Session cleanup completed: ${validCount} valid, ${invalidCount} invalid removed`
       )
     } catch (error) {
       // 清理失败不应阻止服务启动
@@ -549,9 +604,7 @@ class Application {
       await this.initialize()
 
       this.server = this.app.listen(config.server.port, config.server.host, () => {
-        logger.start(
-          `🚀 Claude Relay Service started on ${config.server.host}:${config.server.port}`
-        )
+        logger.start(`Claude Relay Service started on ${config.server.host}:${config.server.port}`)
         logger.info(
           `🌐 Web interface: http://${config.server.host}:${config.server.port}/admin-next/api-stats`
         )
@@ -586,9 +639,12 @@ class Application {
 
       // 注册各个服务的缓存实例
       const services = [
-        { name: 'claudeAccount', service: require('./services/claudeAccountService') },
-        { name: 'claudeConsole', service: require('./services/claudeConsoleAccountService') },
-        { name: 'bedrockAccount', service: require('./services/bedrockAccountService') }
+        { name: 'claudeAccount', service: require('./services/account/claudeAccountService') },
+        {
+          name: 'claudeConsole',
+          service: require('./services/account/claudeConsoleAccountService')
+        },
+        { name: 'bedrockAccount', service: require('./services/account/bedrockAccountService') }
       ]
 
       // 注册已加载的服务缓存
@@ -606,7 +662,7 @@ class Application {
         logger.info(`📊 Cache System - Registered: ${stats.cacheCount} caches`)
       }, 5000)
 
-      logger.success('✅ Cache monitoring initialized')
+      logger.success('Cache monitoring initialized')
     } catch (error) {
       logger.error('❌ Failed to initialize cache monitoring:', error)
       // 不阻止应用启动
@@ -620,7 +676,7 @@ class Application {
         logger.info('🧹 Starting scheduled cleanup...')
 
         const apiKeyService = require('./services/apiKeyService')
-        const claudeAccountService = require('./services/claudeAccountService')
+        const claudeAccountService = require('./services/account/claudeAccountService')
 
         const [expiredKeys, errorAccounts] = await Promise.all([
           apiKeyService.cleanupExpiredKeys(),
@@ -655,7 +711,7 @@ class Application {
     // 每分钟主动清理所有过期的并发项，不依赖请求触发
     setInterval(async () => {
       try {
-        const keys = await redis.keys('concurrency:*')
+        const keys = await redis.scanKeys('concurrency:*')
         if (keys.length === 0) {
           return
         }
@@ -837,9 +893,9 @@ class Application {
           // 🔢 清理所有并发计数（Phase 1 修复：防止重启泄漏）
           try {
             logger.info('🔢 Cleaning up all concurrency counters...')
-            const keys = await redis.keys('concurrency:*')
+            const keys = await redis.scanKeys('concurrency:*')
             if (keys.length > 0) {
-              await redis.client.del(...keys)
+              await redis.batchDelChunked(keys)
               logger.info(`✅ Cleaned ${keys.length} concurrency keys`)
             } else {
               logger.info('✅ No concurrency keys to clean')
@@ -856,7 +912,7 @@ class Application {
             logger.error('❌ Error disconnecting Redis:', error)
           }
 
-          logger.success('✅ Graceful shutdown completed')
+          logger.success('Graceful shutdown completed')
           process.exit(0)
         })
 

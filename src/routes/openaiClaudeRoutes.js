@@ -7,12 +7,13 @@ const express = require('express')
 const router = express.Router()
 const logger = require('../utils/logger')
 const { authenticateApiKey } = require('../middleware/auth')
-const claudeRelayService = require('../services/claudeRelayService')
-const claudeConsoleRelayService = require('../services/claudeConsoleRelayService')
+const claudeRelayService = require('../services/relay/claudeRelayService')
+const claudeConsoleRelayService = require('../services/relay/claudeConsoleRelayService')
 const openaiToClaude = require('../services/openaiToClaude')
 const apiKeyService = require('../services/apiKeyService')
-const unifiedClaudeScheduler = require('../services/unifiedClaudeScheduler')
+const unifiedClaudeScheduler = require('../services/scheduler/unifiedClaudeScheduler')
 const claudeCodeHeadersService = require('../services/claudeCodeHeadersService')
+const { getSafeMessage } = require('../utils/errorSanitizer')
 const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const pricingService = require('../services/pricingService')
@@ -23,14 +24,22 @@ function checkPermissions(apiKeyData, requiredPermission = 'claude') {
   return apiKeyService.hasPermission(apiKeyData?.permissions, requiredPermission)
 }
 
-function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') {
+function queueRateLimitUpdate(
+  rateLimitInfo,
+  usageSummary,
+  model,
+  context = '',
+  keyId = null,
+  accountType = null,
+  preCalculatedCost = null
+) {
   if (!rateLimitInfo) {
     return
   }
 
   const label = context ? ` (${context})` : ''
 
-  updateRateLimitCounters(rateLimitInfo, usageSummary, model)
+  updateRateLimitCounters(rateLimitInfo, usageSummary, model, keyId, accountType, preCalculatedCost)
     .then(({ totalTokens, totalCost }) => {
       if (totalTokens > 0) {
         logger.api(`📊 Updated rate limit token count${label}: +${totalTokens} tokens`)
@@ -277,31 +286,59 @@ async function handleChatCompletion(req, res, apiKeyData) {
                 (usage.cache_creation.ephemeral_1h_input_tokens || 0)
               : usage.cache_creation_input_tokens || 0) || 0
           const cacheReadTokens = usage.cache_read_input_tokens || 0
+          const usageWithRequestMeta = { ...usage }
+          const requestBetaHeader =
+            req.headers['anthropic-beta'] ||
+            req.headers['Anthropic-Beta'] ||
+            req.headers['ANTHROPIC-BETA']
+          if (requestBetaHeader) {
+            usageWithRequestMeta.request_anthropic_beta = requestBetaHeader
+          }
+          if (typeof claudeRequest?.speed === 'string' && claudeRequest.speed.trim()) {
+            usageWithRequestMeta.request_speed = claudeRequest.speed.trim().toLowerCase()
+          }
 
           // 使用新的 recordUsageWithDetails 方法来支持详细的缓存数据
           apiKeyService
             .recordUsageWithDetails(
               apiKeyData.id,
-              usage, // 直接传递整个 usage 对象，包含可能的 cache_creation 详细数据
+              usageWithRequestMeta, // 传递 usage + 请求模式元信息（beta/speed）
               model,
               accountId,
               accountType
             )
+            .then((costs) => {
+              queueRateLimitUpdate(
+                req.rateLimitInfo,
+                {
+                  inputTokens: usage.input_tokens || 0,
+                  outputTokens: usage.output_tokens || 0,
+                  cacheCreateTokens,
+                  cacheReadTokens
+                },
+                model,
+                `openai-${accountType}-stream`,
+                req.apiKey?.id,
+                accountType,
+                costs
+              )
+            })
             .catch((error) => {
               logger.error('❌ Failed to record usage:', error)
+              queueRateLimitUpdate(
+                req.rateLimitInfo,
+                {
+                  inputTokens: usage.input_tokens || 0,
+                  outputTokens: usage.output_tokens || 0,
+                  cacheCreateTokens,
+                  cacheReadTokens
+                },
+                model,
+                `openai-${accountType}-stream`,
+                req.apiKey?.id,
+                accountType
+              )
             })
-
-          queueRateLimitUpdate(
-            req.rateLimitInfo,
-            {
-              inputTokens: usage.input_tokens || 0,
-              outputTokens: usage.output_tokens || 0,
-              cacheCreateTokens,
-              cacheReadTokens
-            },
-            model,
-            `openai-${accountType}-stream`
-          )
         }
       }
 
@@ -403,30 +440,58 @@ async function handleChatCompletion(req, res, apiKeyData) {
               (usage.cache_creation.ephemeral_1h_input_tokens || 0)
             : usage.cache_creation_input_tokens || 0) || 0
         const cacheReadTokens = usage.cache_read_input_tokens || 0
+        const usageWithRequestMeta = { ...usage }
+        const requestBetaHeader =
+          req.headers['anthropic-beta'] ||
+          req.headers['Anthropic-Beta'] ||
+          req.headers['ANTHROPIC-BETA']
+        if (requestBetaHeader) {
+          usageWithRequestMeta.request_anthropic_beta = requestBetaHeader
+        }
+        if (typeof claudeRequest?.speed === 'string' && claudeRequest.speed.trim()) {
+          usageWithRequestMeta.request_speed = claudeRequest.speed.trim().toLowerCase()
+        }
         // 使用新的 recordUsageWithDetails 方法来支持详细的缓存数据
         apiKeyService
           .recordUsageWithDetails(
             apiKeyData.id,
-            usage, // 直接传递整个 usage 对象，包含可能的 cache_creation 详细数据
+            usageWithRequestMeta, // 传递 usage + 请求模式元信息（beta/speed）
             claudeRequest.model,
             accountId,
             accountType
           )
+          .then((costs) => {
+            queueRateLimitUpdate(
+              req.rateLimitInfo,
+              {
+                inputTokens: usage.input_tokens || 0,
+                outputTokens: usage.output_tokens || 0,
+                cacheCreateTokens,
+                cacheReadTokens
+              },
+              claudeRequest.model,
+              `openai-${accountType}-non-stream`,
+              req.apiKey?.id,
+              accountType,
+              costs
+            )
+          })
           .catch((error) => {
             logger.error('❌ Failed to record usage:', error)
+            queueRateLimitUpdate(
+              req.rateLimitInfo,
+              {
+                inputTokens: usage.input_tokens || 0,
+                outputTokens: usage.output_tokens || 0,
+                cacheCreateTokens,
+                cacheReadTokens
+              },
+              claudeRequest.model,
+              `openai-${accountType}-non-stream`,
+              req.apiKey?.id,
+              accountType
+            )
           })
-
-        queueRateLimitUpdate(
-          req.rateLimitInfo,
-          {
-            inputTokens: usage.input_tokens || 0,
-            outputTokens: usage.output_tokens || 0,
-            cacheCreateTokens,
-            cacheReadTokens
-          },
-          claudeRequest.model,
-          `openai-${accountType}-non-stream`
-        )
       }
 
       // 返回 OpenAI 格式响应
@@ -452,7 +517,7 @@ async function handleChatCompletion(req, res, apiKeyData) {
         const status = error.status || 500
         res.status(status).json({
           error: {
-            message: error.message || 'Internal server error',
+            message: getSafeMessage(error),
             type: 'server_error',
             code: 'internal_error'
           }

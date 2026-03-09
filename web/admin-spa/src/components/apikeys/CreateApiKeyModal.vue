@@ -386,7 +386,7 @@
 
           <div>
             <label class="mb-2 block text-sm font-semibold text-gray-700 dark:text-gray-300"
-              >Opus 模型周费用限制 (美元)</label
+              >Claude 模型周费用限制 (美元)</label
             >
             <div class="space-y-2">
               <div class="flex gap-2">
@@ -428,8 +428,43 @@
                 type="number"
               />
               <p class="text-xs text-gray-500 dark:text-gray-400">
-                设置 Opus 模型的周费用限制（周一到周日），仅限 Claude 官方账户，0 或留空表示无限制
+                设置 Claude 模型的周费用限制，仅对 Claude 模型请求生效，0 或留空表示无限制
               </p>
+              <div
+                v-if="form.weeklyOpusCostLimit && Number(form.weeklyOpusCostLimit) > 0"
+                class="mt-2 flex gap-3"
+              >
+                <div class="flex-1">
+                  <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                    >重置日</label
+                  >
+                  <select
+                    v-model="form.weeklyResetDay"
+                    class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  >
+                    <option :value="1">周一</option>
+                    <option :value="2">周二</option>
+                    <option :value="3">周三</option>
+                    <option :value="4">周四</option>
+                    <option :value="5">周五</option>
+                    <option :value="6">周六</option>
+                    <option :value="7">周日</option>
+                  </select>
+                </div>
+                <div class="flex-1">
+                  <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400"
+                    >重置时间 (UTC+8)</label
+                  >
+                  <select
+                    v-model="form.weeklyResetHour"
+                    class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  >
+                    <option v-for="h in 24" :key="h - 1" :value="h - 1">
+                      {{ String(h - 1).padStart(2, '0') }}:00
+                    </option>
+                  </select>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -459,6 +494,51 @@
               placeholder="描述此 API Key 的用途..."
               rows="2"
             />
+          </div>
+
+          <!-- 服务倍率设置 -->
+          <div
+            class="rounded-lg border border-purple-200 bg-gradient-to-r from-purple-50 to-indigo-50 p-3 dark:border-purple-700 dark:from-purple-900/20 dark:to-indigo-900/20 sm:p-4"
+          >
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <input
+                  id="enableServiceRates"
+                  v-model="enableServiceRates"
+                  class="h-4 w-4 rounded border-gray-300 bg-gray-100 text-purple-600 focus:ring-purple-500"
+                  type="checkbox"
+                />
+                <label
+                  class="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-300"
+                  for="enableServiceRates"
+                >
+                  自定义服务倍率
+                </label>
+              </div>
+              <span class="text-xs text-gray-500 dark:text-gray-400">
+                与全局倍率相乘，用于 VIP 折扣等（如全局1.5 × Key倍率0.8 = 1.2）
+              </span>
+            </div>
+            <div v-if="enableServiceRates" class="mt-3 space-y-2">
+              <div
+                v-for="service in availableServices"
+                :key="service.key"
+                class="flex items-center gap-2"
+              >
+                <span class="w-20 text-xs text-gray-600 dark:text-gray-400">{{
+                  service.label
+                }}</span>
+                <input
+                  v-model.number="form.serviceRates[service.key]"
+                  class="form-input w-24 border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  min="0"
+                  placeholder="1.0"
+                  step="0.1"
+                  type="number"
+                />
+                <span class="text-xs text-gray-400">默认 1.0</span>
+              </div>
+            </div>
           </div>
 
           <div>
@@ -586,6 +666,7 @@
                   class="mr-2 rounded text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                   type="checkbox"
                   value="claude"
+                  @change="updatePermissions"
                 />
                 <span class="text-sm text-gray-700 dark:text-gray-300">Claude</span>
               </label>
@@ -595,6 +676,7 @@
                   class="mr-2 rounded text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                   type="checkbox"
                   value="gemini"
+                  @change="updatePermissions"
                 />
                 <span class="text-sm text-gray-700 dark:text-gray-300">Gemini</span>
               </label>
@@ -604,6 +686,7 @@
                   class="mr-2 rounded text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                   type="checkbox"
                   value="openai"
+                  @change="updatePermissions"
                 />
                 <span class="text-sm text-gray-700 dark:text-gray-300">OpenAI</span>
               </label>
@@ -613,6 +696,7 @@
                   class="mr-2 rounded text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                   type="checkbox"
                   value="droid"
+                  @change="updatePermissions"
                 />
                 <span class="text-sm text-gray-700 dark:text-gray-300">Droid</span>
               </label>
@@ -854,6 +938,27 @@
             </div>
           </div>
 
+          <!-- 允许 1M 上下文 -->
+          <div>
+            <div class="mb-2 flex items-center">
+              <input
+                id="allow1mContext"
+                v-model="form.allow1mContext"
+                class="h-4 w-4 rounded border-gray-300 bg-gray-100 text-blue-600 focus:ring-blue-500"
+                type="checkbox"
+              />
+              <label
+                class="ml-2 cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-300"
+                for="allow1mContext"
+              >
+                允许 1M 上下文
+              </label>
+            </div>
+            <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
+              启用后允许使用 [1m] 模型（需要 Bedrock 账户支持）
+            </p>
+          </div>
+
           <div class="flex gap-3 pt-2">
             <button
               class="flex-1 rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
@@ -875,16 +980,29 @@
         </form>
       </div>
     </div>
+
+    <!-- ConfirmModal -->
+    <ConfirmModal
+      :cancel-text="confirmModalConfig.cancelText"
+      :confirm-text="confirmModalConfig.confirmText"
+      :message="confirmModalConfig.message"
+      :show="showConfirmModal"
+      :title="confirmModalConfig.title"
+      :type="confirmModalConfig.type"
+      @cancel="handleCancelModal"
+      @confirm="handleConfirmModal"
+    />
   </Teleport>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { showToast } from '@/utils/toast'
+import { showToast } from '@/utils/tools'
 import { useClientsStore } from '@/stores/clients'
 import { useApiKeysStore } from '@/stores/apiKeys'
-import { apiClient } from '@/config/api'
+import * as httpApis from '@/utils/http_apis'
 import AccountSelector from '@/components/common/AccountSelector.vue'
+import ConfirmModal from '@/components/common/ConfirmModal.vue'
 
 const props = defineProps({
   accounts: {
@@ -909,6 +1027,40 @@ const clientsStore = useClientsStore()
 const apiKeysStore = useApiKeysStore()
 const loading = ref(false)
 const accountsLoading = ref(false)
+
+// ConfirmModal 状态
+const showConfirmModal = ref(false)
+const confirmModalConfig = ref({
+  title: '',
+  message: '',
+  type: 'primary',
+  confirmText: '确认',
+  cancelText: '取消'
+})
+const confirmResolve = ref(null)
+
+const showConfirm = (
+  title,
+  message,
+  confirmText = '确认',
+  cancelText = '取消',
+  type = 'primary'
+) => {
+  return new Promise((resolve) => {
+    confirmModalConfig.value = { title, message, confirmText, cancelText, type }
+    confirmResolve.value = resolve
+    showConfirmModal.value = true
+  })
+}
+const handleConfirmModal = () => {
+  showConfirmModal.value = false
+  confirmResolve.value?.(true)
+}
+const handleCancelModal = () => {
+  showConfirmModal.value = false
+  confirmResolve.value?.(false)
+}
+
 const localAccounts = ref({
   claude: [],
   gemini: [],
@@ -938,12 +1090,25 @@ const unselectedTags = computed(() => {
 // 支持的客户端列表
 const supportedClients = ref([])
 
+// 服务倍率相关
+const enableServiceRates = ref(false)
+const availableServices = [
+  { key: 'claude', label: 'Claude' },
+  { key: 'gemini', label: 'Gemini' },
+  { key: 'codex', label: 'Codex' },
+  { key: 'droid', label: 'Droid' },
+  { key: 'bedrock', label: 'Bedrock' },
+  { key: 'azure', label: 'Azure' },
+  { key: 'ccr', label: 'CCR' }
+]
+
 // 表单数据
 const form = reactive({
   createType: 'single',
   batchCount: 10,
   name: '',
   description: '',
+  serviceRates: {}, // API Key 级别服务倍率
   rateLimitWindow: '',
   rateLimitRequests: '',
   rateLimitCost: '', // 新增：费用限制
@@ -951,6 +1116,8 @@ const form = reactive({
   dailyCostLimit: '',
   totalCostLimit: '',
   weeklyOpusCostLimit: '',
+  weeklyResetDay: 1,
+  weeklyResetHour: 0,
   expireDuration: '',
   customExpireDate: '',
   expiresAt: null,
@@ -968,8 +1135,14 @@ const form = reactive({
   modelInput: '',
   enableClientRestriction: false,
   allowedClients: [],
+  allow1mContext: false,
   tags: []
 })
+
+// 更新权限（数组格式，空数组=全部服务）
+const updatePermissions = () => {
+  // form.permissions 已经是数组，由 v-model 自动管理
+}
 
 // 加载支持的客户端和已存在的标签
 onMounted(async () => {
@@ -1037,15 +1210,15 @@ const refreshAccounts = async () => {
       droidData,
       groupsData
     ] = await Promise.all([
-      apiClient.get('/admin/claude-accounts'),
-      apiClient.get('/admin/claude-console-accounts'),
-      apiClient.get('/admin/gemini-accounts'),
-      apiClient.get('/admin/gemini-api-accounts'), // 获取 Gemini-API 账号
-      apiClient.get('/admin/openai-accounts'),
-      apiClient.get('/admin/openai-responses-accounts'), // 获取 OpenAI-Responses 账号
-      apiClient.get('/admin/bedrock-accounts'),
-      apiClient.get('/admin/droid-accounts'),
-      apiClient.get('/admin/account-groups')
+      httpApis.getClaudeAccountsApi(),
+      httpApis.getClaudeConsoleAccountsApi(),
+      httpApis.getGeminiAccountsApi(),
+      httpApis.getGeminiApiAccountsApi(), // 获取 Gemini-API 账号
+      httpApis.getOpenAIAccountsApi(),
+      httpApis.getOpenAIResponsesAccountsApi(), // 获取 OpenAI-Responses 账号
+      httpApis.getBedrockAccountsApi(),
+      httpApis.getDroidAccountsApi(),
+      httpApis.getAccountGroupsApi()
     ])
 
     // 合并Claude OAuth账户和Claude Console账户
@@ -1322,18 +1495,13 @@ const createApiKey = async () => {
 
   // 检查是否设置了时间窗口但费用限制为0
   if (form.rateLimitWindow && (!form.rateLimitCost || parseFloat(form.rateLimitCost) === 0)) {
-    let confirmed = false
-    if (window.showConfirm) {
-      confirmed = await window.showConfirm(
-        '费用限制提醒',
-        '您设置了时间窗口但费用限制为0，这意味着不会有费用限制。\n\n是否继续？',
-        '继续创建',
-        '返回修改'
-      )
-    } else {
-      // 降级方案
-      confirmed = confirm('您设置了时间窗口但费用限制为0，这意味着不会有费用限制。\n是否继续？')
-    }
+    const confirmed = await showConfirm(
+      '费用限制提醒',
+      '您设置了时间窗口但费用限制为0，这意味着不会有费用限制。\n\n是否继续？',
+      '继续创建',
+      '返回修改',
+      'warning'
+    )
     if (!confirmed) {
       return
     }
@@ -1343,8 +1511,19 @@ const createApiKey = async () => {
 
   try {
     // 准备提交的数据
+    // 过滤掉空值的服务倍率
+    const filteredServiceRates = {}
+    if (enableServiceRates.value) {
+      for (const [key, value] of Object.entries(form.serviceRates)) {
+        if (value !== null && value !== undefined && value !== '') {
+          filteredServiceRates[key] = value
+        }
+      }
+    }
+
     const baseData = {
       description: form.description || undefined,
+      serviceRates: filteredServiceRates,
       tokenLimit: 0, // 设置为0，清除历史token限制
       rateLimitWindow:
         form.rateLimitWindow !== '' && form.rateLimitWindow !== null
@@ -1374,6 +1553,8 @@ const createApiKey = async () => {
         form.weeklyOpusCostLimit !== '' && form.weeklyOpusCostLimit !== null
           ? parseFloat(form.weeklyOpusCostLimit)
           : 0,
+      weeklyResetDay: form.weeklyResetDay,
+      weeklyResetHour: form.weeklyResetHour,
       expiresAt: form.expirationMode === 'fixed' ? form.expiresAt || undefined : undefined,
       expirationMode: form.expirationMode,
       activationDays: form.expirationMode === 'activation' ? form.activationDays : undefined,
@@ -1383,7 +1564,8 @@ const createApiKey = async () => {
       enableModelRestriction: form.enableModelRestriction,
       restrictedModels: form.restrictedModels,
       enableClientRestriction: form.enableClientRestriction,
-      allowedClients: form.allowedClients
+      allowedClients: form.allowedClients,
+      allow1mContext: form.allow1mContext
     }
 
     // 处理Claude账户绑定（区分OAuth和Console）
@@ -1426,7 +1608,7 @@ const createApiKey = async () => {
         name: form.name
       }
 
-      const result = await apiClient.post('/admin/api-keys', data)
+      const result = await httpApis.createApiKeyApi(data)
 
       if (result.success) {
         showToast('API Key 创建成功', 'success')
@@ -1444,7 +1626,7 @@ const createApiKey = async () => {
         count: form.batchCount
       }
 
-      const result = await apiClient.post('/admin/api-keys/batch', data)
+      const result = await httpApis.batchCreateApiKeysApi(data)
 
       if (result.success) {
         showToast(`成功创建 ${result.data.length} 个 API Key`, 'success')
@@ -1461,7 +1643,3 @@ const createApiKey = async () => {
   }
 }
 </script>
-
-<style scoped>
-/* 表单样式由全局样式提供 */
-</style>

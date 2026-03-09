@@ -1,5 +1,5 @@
 const express = require('express')
-const azureOpenaiAccountService = require('../../services/azureOpenaiAccountService')
+const azureOpenaiAccountService = require('../../services/account/azureOpenaiAccountService')
 const accountGroupService = require('../../services/accountGroupService')
 const apiKeyService = require('../../services/apiKeyService')
 const redis = require('../../models/redis')
@@ -411,6 +411,102 @@ router.post('/migrate-api-keys-azure', authenticateAdmin, async (req, res) => {
       message: 'Failed to migrate API keys',
       error: error.message
     })
+  }
+})
+
+// 测试 Azure OpenAI 账户连通性
+router.post('/azure-openai-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
+  const { accountId } = req.params
+  const startTime = Date.now()
+  const {
+    createChatCompletionsTestPayload,
+    extractErrorMessage
+  } = require('../../utils/testPayloadHelper')
+
+  try {
+    // 获取账户信息
+    const account = await azureOpenaiAccountService.getAccount(accountId)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+
+    // 获取解密后的 API Key
+    const apiKey = await azureOpenaiAccountService.getDecryptedApiKey(accountId)
+    if (!apiKey) {
+      return res.status(401).json({ error: 'API Key not found or decryption failed' })
+    }
+
+    // 构造测试请求
+    const { getProxyAgent } = require('../../utils/proxyHelper')
+
+    const deploymentName = account.deploymentName || 'gpt-4o-mini'
+    const apiVersion = account.apiVersion || '2024-02-15-preview'
+    const apiUrl = `${account.endpoint}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`
+    const payload = createChatCompletionsTestPayload(deploymentName)
+
+    const requestConfig = {
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': apiKey
+      },
+      timeout: 30000
+    }
+
+    // 配置代理
+    if (account.proxy) {
+      const agent = getProxyAgent(account.proxy)
+      if (agent) {
+        requestConfig.httpsAgent = agent
+        requestConfig.httpAgent = agent
+      }
+    }
+
+    const response = await axios.post(apiUrl, payload, requestConfig)
+    const latency = Date.now() - startTime
+
+    // 提取响应文本
+    let responseText = ''
+    if (response.data?.choices?.[0]?.message?.content) {
+      responseText = response.data.choices[0].message.content
+    }
+
+    logger.success(
+      `✅ Azure OpenAI account test passed: ${account.name} (${accountId}), latency: ${latency}ms`
+    )
+
+    return res.json({
+      success: true,
+      data: {
+        accountId,
+        accountName: account.name,
+        model: deploymentName,
+        latency,
+        responseText: responseText.substring(0, 200)
+      }
+    })
+  } catch (error) {
+    const latency = Date.now() - startTime
+    logger.error(`❌ Azure OpenAI account test failed: ${accountId}`, error.message)
+
+    return res.status(500).json({
+      success: false,
+      error: 'Test failed',
+      message: extractErrorMessage(error.response?.data, error.message),
+      latency
+    })
+  }
+})
+
+// 重置 Azure OpenAI 账户状态
+router.post('/:accountId/reset-status', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params
+    const result = await azureOpenaiAccountService.resetAccountStatus(accountId)
+    logger.success(`Admin reset status for Azure OpenAI account: ${accountId}`)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    logger.error('❌ Failed to reset Azure OpenAI account status:', error)
+    return res.status(500).json({ error: 'Failed to reset status', message: error.message })
   }
 })
 

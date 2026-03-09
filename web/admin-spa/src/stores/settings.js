@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { apiClient } from '@/config/api'
+
+import { getOemSettingsApi, updateOemSettingsApi } from '@/utils/http_apis'
 
 export const useSettingsStore = defineStore('settings', () => {
   // 状态
@@ -17,55 +18,34 @@ export const useSettingsStore = defineStore('settings', () => {
     publicStatsShowAccountTrends: false,
     publicStatsTrendsPeriod: '7d', // 使用趋势时间范围: today, 24h, 7d, 30d
     publicStatsShowSessionWindow: false, // 是否显示账户会话窗口（负载情况）
+    apiStatsNotice: { enabled: false, title: '', content: '' },
     updatedAt: null
   })
 
   const loading = ref(false)
   const saving = ref(false)
 
-  // 移除自定义API请求方法，使用统一的apiClient
-
   // Actions
   const loadOemSettings = async () => {
     loading.value = true
-    try {
-      const result = await apiClient.get('/admin/oem-settings')
-
-      if (result && result.success) {
-        oemSettings.value = { ...oemSettings.value, ...result.data }
-
-        // 应用设置到页面
-        applyOemSettings()
-      }
-
-      return result
-    } catch (error) {
-      console.error('Failed to load OEM settings:', error)
-      throw error
-    } finally {
-      loading.value = false
+    const res = await getOemSettingsApi()
+    if (res.success) {
+      oemSettings.value = { ...oemSettings.value, ...res.data }
+      applyOemSettings()
     }
+    loading.value = false
+    return res
   }
 
   const saveOemSettings = async (settings) => {
     saving.value = true
-    try {
-      const result = await apiClient.put('/admin/oem-settings', settings)
-
-      if (result && result.success) {
-        oemSettings.value = { ...oemSettings.value, ...result.data }
-
-        // 应用设置到页面
-        applyOemSettings()
-      }
-
-      return result
-    } catch (error) {
-      console.error('Failed to save OEM settings:', error)
-      throw error
-    } finally {
-      saving.value = false
+    const res = await updateOemSettingsApi(settings)
+    if (res.success) {
+      oemSettings.value = { ...oemSettings.value, ...res.data }
+      applyOemSettings()
     }
+    saving.value = false
+    return res
   }
 
   const resetOemSettings = async () => {
@@ -75,6 +55,14 @@ export const useSettingsStore = defineStore('settings', () => {
       siteIconData: '',
       showAdminButton: true,
       publicStatsEnabled: false,
+      publicStatsShowModelDistribution: true,
+      publicStatsModelDistributionPeriod: 'today',
+      publicStatsShowTokenTrends: false,
+      publicStatsShowApiKeysTrends: false,
+      publicStatsShowAccountTrends: false,
+      publicStatsTrendsPeriod: '7d',
+      publicStatsShowSessionWindow: false,
+      apiStatsNotice: { enabled: false, title: '', content: '' },
       updatedAt: null
     }
 

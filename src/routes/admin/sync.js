@@ -8,10 +8,10 @@ const router = express.Router()
 
 const { authenticateAdmin } = require('../../middleware/auth')
 const redis = require('../../models/redis')
-const claudeAccountService = require('../../services/claudeAccountService')
-const claudeConsoleAccountService = require('../../services/claudeConsoleAccountService')
-const openaiAccountService = require('../../services/openaiAccountService')
-const openaiResponsesAccountService = require('../../services/openaiResponsesAccountService')
+const claudeAccountService = require('../../services/account/claudeAccountService')
+const claudeConsoleAccountService = require('../../services/account/claudeConsoleAccountService')
+const openaiAccountService = require('../../services/account/openaiAccountService')
+const openaiResponsesAccountService = require('../../services/account/openaiResponsesAccountService')
 const logger = require('../../utils/logger')
 
 function toBool(value, defaultValue = false) {
@@ -288,10 +288,12 @@ router.get('/sync/export-accounts', authenticateAdmin, async (req, res) => {
     // ===== OpenAI OAuth accounts =====
     const openaiOAuthAccounts = []
     {
-      const client = redis.getClientSafe()
-      const openaiKeys = await client.keys('openai:account:*')
-      for (const key of openaiKeys) {
-        const id = key.split(':').slice(2).join(':')
+      const openaiIds = await redis.getAllIdsByIndex(
+        'openai:account:index',
+        'openai:account:*',
+        /^openai:account:(.+)$/
+      )
+      for (const id of openaiIds) {
         const account = await openaiAccountService.getAccount(id)
         if (!account) {
           continue
@@ -390,10 +392,12 @@ router.get('/sync/export-accounts', authenticateAdmin, async (req, res) => {
 
     // ===== OpenAI Responses API Key accounts =====
     const openaiResponsesAccounts = []
-    const client = redis.getClientSafe()
-    const openaiResponseKeys = await client.keys('openai_responses_account:*')
-    for (const key of openaiResponseKeys) {
-      const id = key.split(':').slice(1).join(':')
+    const openaiResponseIds = await redis.getAllIdsByIndex(
+      'openai_responses_account:index',
+      'openai_responses_account:*',
+      /^openai_responses_account:(.+)$/
+    )
+    for (const id of openaiResponseIds) {
       const full = await openaiResponsesAccountService.getAccount(id)
       if (!full) {
         continue

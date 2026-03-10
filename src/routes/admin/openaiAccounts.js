@@ -244,11 +244,16 @@ router.get('/', authenticateAdmin, async (req, res) => {
     const accountIds = accounts.map((account) => account.id)
     const accountCreatedAtMap = new Map(accounts.map((account) => [account.id, account.createdAt]))
     const preloadStartedAt = Date.now()
-    const [allGroupInfosMap, allUsageStatsMap] = await Promise.all([
-      accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai'),
-      redis.batchGetAccountUsageStats(accountIds, accountCreatedAtMap)
-    ])
+    const groupStartedAt = Date.now()
+    const groupPromise = accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai')
+    const usageStartedAt = Date.now()
+    const usagePromise = redis.batchGetAccountUsageStats(accountIds, accountCreatedAtMap, {
+      skipDailyCostFallback: true
+    })
+    const [allGroupInfosMap, allUsageStatsMap] = await Promise.all([groupPromise, usagePromise])
     const preloadMs = Date.now() - preloadStartedAt
+    const groupsMs = Date.now() - groupStartedAt
+    const usageMs = Date.now() - usageStartedAt
 
     // 如果指定了分组筛选
     const filterStartedAt = Date.now()
@@ -303,6 +308,8 @@ router.get('/', authenticateAdmin, async (req, res) => {
       accountCount: accountsWithStats.length,
       loadAccountsMs,
       preloadMs,
+      groupsMs,
+      usageMs,
       filterMs,
       mapMs,
       totalMs: Date.now() - startedAt

@@ -1995,7 +1995,8 @@ class RedisClient {
   }
 
   // 💰 批量计算多个账户的每日费用
-  async batchGetAccountDailyCost(accountIds) {
+  async batchGetAccountDailyCost(accountIds, options = {}) {
+    const { skipFallbackOnEmptyIndex = false } = options
     if (!accountIds || accountIds.length === 0) {
       return new Map()
     }
@@ -2029,6 +2030,13 @@ class RedisClient {
 
     // 如果索引为空，回退到 KEYS 命令（兼容旧数据）
     if (allEntries.length === 0) {
+      if (skipFallbackOnEmptyIndex) {
+        logger.performance('redis.batchGetAccountDailyCost.emptyIndex', {
+          accountCount: accountIds.length,
+          fallbackSkipped: true
+        })
+        return costMap
+      }
       logger.debug('💰 Daily cost index empty, falling back to KEYS for batch cost calculation')
       for (const accountId of accountIds) {
         try {
@@ -2246,10 +2254,13 @@ class RedisClient {
     }
   }
 
-  async batchGetAccountUsageStats(accountIds, accountCreatedAtMap = null) {
+  async batchGetAccountUsageStats(accountIds, accountCreatedAtMap = null, options = {}) {
+    const { skipDailyCostFallback = false } = options
     if (!Array.isArray(accountIds) || accountIds.length === 0) {
       return new Map()
     }
+
+    const startedAt = Date.now()
 
     const today = getDateStringInTimezone()
     const tzDate = getDateInTimezone()
@@ -2265,10 +2276,14 @@ class RedisClient {
       statsPipeline.hgetall(`account_usage:monthly:${accountId}:${currentMonth}`)
     }
 
+    const statsStartedAt = Date.now()
     const [statsResults, dailyCostMap] = await Promise.all([
       statsPipeline.exec(),
-      this.batchGetAccountDailyCost(accountIds)
+      this.batchGetAccountDailyCost(accountIds, {
+        skipFallbackOnEmptyIndex: skipDailyCostFallback
+      })
     ])
+    const statsAndCostMs = Date.now() - statsStartedAt
 
     const resolveCreatedAt = (accountId) => {
       if (!accountCreatedAtMap) {
@@ -2337,6 +2352,13 @@ class RedisClient {
         }
       })
     }
+
+    logger.performance('redis.batchGetAccountUsageStats', {
+      accountCount: accountIds.length,
+      statsAndCostMs,
+      totalMs: Date.now() - startedAt,
+      skipDailyCostFallback
+    })
 
     return usageStatsMap
   }

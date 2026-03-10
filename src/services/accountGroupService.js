@@ -553,17 +553,8 @@ class AccountGroupService {
       if (!hasAnyGroups) {
         const migrated = await client.get(this.REVERSE_INDEX_MIGRATED_KEY)
         if (migrated !== 'true') {
-          logger.debug('📁 Reverse index not migrated, falling back to getAccountGroups')
-          const result = new Map()
-          for (const accountId of accountIds) {
-            try {
-              const groups = await this.getAccountGroups(accountId)
-              result.set(accountId, groups)
-            } catch {
-              result.set(accountId, [])
-            }
-          }
-          return result
+          logger.debug('📁 Reverse index not migrated, falling back to batched group scan')
+          return await this.batchGetAccountGroupsLegacy(accountIds, platform, { skipMemberCount })
         }
       }
 
@@ -636,6 +627,103 @@ class AccountGroupService {
       return result
     } catch (error) {
       logger.error('❌ 批量获取账户分组失败:', error)
+      return new Map(accountIds.map((id) => [id, []]))
+    }
+  }
+
+  async batchGetAccountGroupsLegacy(accountIds, platform, options = {}) {
+    const { skipMemberCount = true } = options
+
+    if (!accountIds || accountIds.length === 0) {
+      return new Map()
+    }
+
+    const startedAt = Date.now()
+    try {
+      const client = redis.getClientSafe()
+      const requestedAccountIds = new Set(accountIds)
+      const result = new Map(accountIds.map((id) => [id, []]))
+
+      const allGroupIds = await client.smembers(this.GROUPS_KEY)
+      if (!allGroupIds || allGroupIds.length === 0) {
+        return result
+      }
+
+      const groupPipeline = client.pipeline()
+      for (const groupId of allGroupIds) {
+        groupPipeline.hgetall(`${this.GROUP_PREFIX}${groupId}`)
+        if (!skipMemberCount) {
+          groupPipeline.scard(`${this.GROUP_MEMBERS_PREFIX}${groupId}`)
+        }
+      }
+      const groupResults = await groupPipeline.exec()
+
+      const relevantGroups = []
+      const step = skipMemberCount ? 1 : 2
+      for (let i = 0; i < allGroupIds.length; i++) {
+        const groupId = allGroupIds[i]
+        const [groupErr, groupData] = groupResults[i * step]
+        if (groupErr || !groupData || Object.keys(groupData).length === 0) {
+          continue
+        }
+        if (groupData.platform !== platform) {
+          continue
+        }
+        const group = { ...groupData }
+        if (!skipMemberCount) {
+          const [countErr, memberCount] = groupResults[i * step + 1]
+          group.memberCount = countErr ? 0 : memberCount || 0
+        }
+        relevantGroups.push({ id: groupId, group })
+      }
+
+      if (relevantGroups.length === 0) {
+        return result
+      }
+
+      const membersPipeline = client.pipeline()
+      for (const { id } of relevantGroups) {
+        membersPipeline.smembers(`${this.GROUP_MEMBERS_PREFIX}${id}`)
+      }
+      const memberResults = await membersPipeline.exec()
+
+      for (let i = 0; i < relevantGroups.length; i++) {
+        const { id: groupId, group } = relevantGroups[i]
+        const [membersErr, members] = memberResults[i]
+        if (membersErr || !Array.isArray(members) || members.length === 0) {
+          continue
+        }
+
+        const matchedMembers = members.filter((accountId) => requestedAccountIds.has(accountId))
+        if (matchedMembers.length === 0) {
+          continue
+        }
+
+        for (const accountId of matchedMembers) {
+          result.get(accountId).push(group)
+        }
+
+        const backfillPipeline = client.pipeline()
+        for (const accountId of matchedMembers) {
+          backfillPipeline.sadd(`${this.REVERSE_INDEX_PREFIX}${platform}:${accountId}`, groupId)
+        }
+        backfillPipeline.exec().catch(() => {})
+      }
+
+      for (const groups of result.values()) {
+        groups.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      }
+
+      logger.performance('accountGroups.batchLegacyLookup', {
+        platform,
+        requestedAccountCount: accountIds.length,
+        relevantGroupCount: relevantGroups.length,
+        durationMs: Date.now() - startedAt
+      })
+
+      return result
+    } catch (error) {
+      logger.error('❌ 批量旧版分组扫描失败:', error)
       return new Map(accountIds.map((id) => [id, []]))
     }
   }

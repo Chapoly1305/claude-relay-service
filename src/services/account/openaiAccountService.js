@@ -680,16 +680,22 @@ async function deleteAccount(accountId) {
 
 // 获取所有账户
 async function getAllAccounts() {
+  const startedAt = Date.now()
   const _client = redisClient.getClientSafe()
+  const idsStartedAt = Date.now()
   const accountIds = await redisClient.getAllIdsByIndex(
     'openai:account:index',
     `${OPENAI_ACCOUNT_KEY_PREFIX}*`,
     /^openai:account:(.+)$/
   )
+  const getIdsMs = Date.now() - idsStartedAt
   const keys = accountIds.map((id) => `${OPENAI_ACCOUNT_KEY_PREFIX}${id}`)
   const accounts = []
+  const fetchStartedAt = Date.now()
   const dataList = await redisClient.batchHgetallChunked(keys)
+  const fetchHashesMs = Date.now() - fetchStartedAt
 
+  const processStartedAt = Date.now()
   for (let i = 0; i < keys.length; i++) {
     const accountData = dataList[i]
     if (accountData && Object.keys(accountData).length > 0) {
@@ -780,6 +786,16 @@ async function getAllAccounts() {
       })
     }
   }
+
+  const processMs = Date.now() - processStartedAt
+  const totalMs = Date.now() - startedAt
+  logger.performance('openai.getAllAccounts', {
+    accountCount: accounts.length,
+    getIdsMs,
+    fetchHashesMs,
+    processMs,
+    totalMs
+  })
 
   return accounts
 }

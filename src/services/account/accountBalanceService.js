@@ -87,11 +87,15 @@ class AccountBalanceService {
   }
 
   async getAllAccountsBalance(platform, options = {}) {
+    const startedAt = Date.now()
     const normalizedPlatform = this.normalizePlatform(platform)
+    const loadAccountsStartedAt = Date.now()
     const accounts = await this.getAllAccountsByPlatform(normalizedPlatform)
+    const loadAccountsMs = Date.now() - loadAccountsStartedAt
     const queryApi = this._parseBoolean(options.queryApi) || false
     const useCache = options.useCache !== false
 
+    const balancesStartedAt = Date.now()
     const results = await this._mapWithConcurrency(
       accounts,
       this.DEFAULT_CONCURRENCY,
@@ -123,6 +127,16 @@ class AccountBalanceService {
         }
       }
     )
+    const fetchBalancesMs = Date.now() - balancesStartedAt
+    this.logger.performance('accountBalance.getAllAccountsBalance', {
+      platform: normalizedPlatform,
+      accountCount: accounts.length,
+      queryApi,
+      useCache,
+      loadAccountsMs,
+      fetchBalancesMs,
+      totalMs: Date.now() - startedAt
+    })
 
     return results
   }

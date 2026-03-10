@@ -228,9 +228,12 @@ router.post('/exchange-code', authenticateAdmin, async (req, res) => {
 
 // 获取所有 OpenAI 账户
 router.get('/', authenticateAdmin, async (req, res) => {
+  const startedAt = Date.now()
   try {
     const { platform, groupId } = req.query
+    const loadStartedAt = Date.now()
     let accounts = await openaiAccountService.getAllAccounts()
+    const loadAccountsMs = Date.now() - loadStartedAt
 
     // 根据查询参数进行筛选
     if (platform && platform !== 'all' && platform !== 'openai') {
@@ -240,12 +243,15 @@ router.get('/', authenticateAdmin, async (req, res) => {
 
     const accountIds = accounts.map((account) => account.id)
     const accountCreatedAtMap = new Map(accounts.map((account) => [account.id, account.createdAt]))
+    const preloadStartedAt = Date.now()
     const [allGroupInfosMap, allUsageStatsMap] = await Promise.all([
       accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai'),
       redis.batchGetAccountUsageStats(accountIds, accountCreatedAtMap)
     ])
+    const preloadMs = Date.now() - preloadStartedAt
 
     // 如果指定了分组筛选
+    const filterStartedAt = Date.now()
     if (groupId && groupId !== 'all') {
       if (groupId === 'ungrouped') {
         accounts = accounts.filter((account) => (allGroupInfosMap.get(account.id) || []).length === 0)
@@ -255,8 +261,10 @@ router.get('/', authenticateAdmin, async (req, res) => {
         accounts = accounts.filter((account) => groupMembers.includes(account.id))
       }
     }
+    const filterMs = Date.now() - filterStartedAt
 
     // 为每个账户添加使用统计信息
+    const mapStartedAt = Date.now()
     const accountsWithStats = await Promise.all(
       accounts.map(async (account) => {
         try {
@@ -288,6 +296,17 @@ router.get('/', authenticateAdmin, async (req, res) => {
         }
       })
     )
+    const mapMs = Date.now() - mapStartedAt
+    logger.performance('admin.openaiAccounts', {
+      requestedPlatform: platform || 'all',
+      groupId: groupId || 'all',
+      accountCount: accountsWithStats.length,
+      loadAccountsMs,
+      preloadMs,
+      filterMs,
+      mapMs,
+      totalMs: Date.now() - startedAt
+    })
 
     logger.info(`获取 OpenAI 账户列表: ${accountsWithStats.length} 个账户`)
 

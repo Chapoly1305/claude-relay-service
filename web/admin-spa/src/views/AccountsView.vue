@@ -865,6 +865,7 @@
                 <td class="whitespace-nowrap px-3 py-4">
                   <BalanceDisplay
                     :account-id="account.id"
+                    :auto-load="false"
                     :initial-balance="account.balanceInfo"
                     :platform="account.platform"
                     :query-mode="
@@ -1564,6 +1565,7 @@
             <p class="mb-1 text-xs text-gray-500 dark:text-gray-400">余额/配额</p>
             <BalanceDisplay
               :account-id="account.id"
+              :auto-load="false"
               :initial-balance="account.balanceInfo"
               :platform="account.platform"
               :query-mode="

@@ -2271,7 +2271,9 @@ class RedisClient {
     ])
 
     const resolveCreatedAt = (accountId) => {
-      if (!accountCreatedAtMap) return new Date()
+      if (!accountCreatedAtMap) {
+        return new Date()
+      }
       if (accountCreatedAtMap instanceof Map) {
         return accountCreatedAtMap.get(accountId) || new Date()
       }
@@ -2314,10 +2316,7 @@ class RedisClient {
       const createdAtRaw = resolveCreatedAt(accountId)
       const createdAt = createdAtRaw ? new Date(createdAtRaw) : new Date()
       const now = new Date()
-      const daysSinceCreated = Math.max(
-        1,
-        Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24))
-      )
+      const daysSinceCreated = Math.max(1, Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24)))
       const totalMinutes = Math.max(1, daysSinceCreated * 24 * 60)
       const totalTokens = totalData.tokens || 0
       const totalRequests = totalData.requests || 0

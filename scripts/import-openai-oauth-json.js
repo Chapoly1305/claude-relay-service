@@ -137,21 +137,28 @@ function buildImportPayload(raw, sourceFile) {
 
   const idPayload = decodeJwtPayload(idToken) || {}
   const accessPayload = decodeJwtPayload(accessToken) || {}
-  const authClaims = idPayload['https://api.openai.com/auth'] || accessPayload['https://api.openai.com/auth'] || {}
+  const authClaims =
+    idPayload['https://api.openai.com/auth'] || accessPayload['https://api.openai.com/auth'] || {}
   const profileClaims =
-    accessPayload['https://api.openai.com/profile'] || idPayload['https://api.openai.com/profile'] || {}
+    accessPayload['https://api.openai.com/profile'] ||
+    idPayload['https://api.openai.com/profile'] ||
+    {}
 
   const organizations = Array.isArray(authClaims.organizations) ? authClaims.organizations : []
   const defaultOrg = organizations.find((org) => org && org.is_default) || organizations[0] || {}
 
-  const email = normalizeString(raw.email || raw.mailtm_email || idPayload.email || profileClaims.email)
+  const email = normalizeString(
+    raw.email || raw.mailtm_email || idPayload.email || profileClaims.email
+  )
   if (!email) {
     throw new Error('missing email')
   }
 
   const accountInfo = {
     accountId: normalizeString(raw.account_id || authClaims.chatgpt_account_id),
-    chatgptUserId: normalizeString(authClaims.chatgpt_user_id || authClaims.user_id || idPayload.sub),
+    chatgptUserId: normalizeString(
+      authClaims.chatgpt_user_id || authClaims.user_id || idPayload.sub
+    ),
     organizationId: normalizeString(defaultOrg.id),
     organizationRole: normalizeString(defaultOrg.role),
     organizationTitle: normalizeString(defaultOrg.title),
@@ -197,7 +204,9 @@ async function main() {
 
   if (!inputPath) {
     console.error('Usage: node scripts/import-openai-oauth-json.js <path> [--dry-run]')
-    console.error('   or: node scripts/import-openai-oauth-json.js --path=/path/to/jsons [--dry-run]')
+    console.error(
+      '   or: node scripts/import-openai-oauth-json.js --path=/path/to/jsons [--dry-run]'
+    )
     process.exit(1)
   }
 
@@ -293,9 +302,10 @@ async function main() {
     process.exitCode = 1
   } finally {
     try {
-      const redis = require('../src/models/redis')
       await redis.disconnect()
-    } catch {}
+    } catch (error) {
+      console.error(error.message || error)
+    }
   }
 }
 

@@ -16,7 +16,7 @@
               ? 'API Key 使用统计'
               : currentTab === 'overview'
                 ? '服务状态概览'
-              : currentTab === 'quota'
+                : currentTab === 'quota'
                 ? '额度卡'
                 : '使用教程'
           "

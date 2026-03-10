@@ -2267,7 +2267,9 @@ import ActionDropdown from '@/components/common/ActionDropdown.vue'
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
 
 const AccountForm = defineAsyncComponent(() => import('@/components/accounts/AccountForm.vue'))
-const CcrAccountForm = defineAsyncComponent(() => import('@/components/accounts/CcrAccountForm.vue'))
+const CcrAccountForm = defineAsyncComponent(
+  () => import('@/components/accounts/CcrAccountForm.vue')
+)
 const AccountUsageDetailModal = defineAsyncComponent(
   () => import('@/components/accounts/AccountUsageDetailModal.vue')
 )

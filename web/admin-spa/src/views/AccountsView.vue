@@ -2257,23 +2257,38 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick, defineAsyncComponent } from 'vue'
 import { showToast, copyText, formatNumber, formatRelativeTime } from '@/utils/tools'
 
 import * as httpApis from '@/utils/http_apis'
-import AccountForm from '@/components/accounts/AccountForm.vue'
-import CcrAccountForm from '@/components/accounts/CcrAccountForm.vue'
-import AccountUsageDetailModal from '@/components/accounts/AccountUsageDetailModal.vue'
-import AccountErrorHistoryModal from '@/components/accounts/AccountErrorHistoryModal.vue'
-import AccountExpiryEditModal from '@/components/accounts/AccountExpiryEditModal.vue'
-import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
-import AccountScheduledTestModal from '@/components/accounts/AccountScheduledTestModal.vue'
 import ConfirmModal from '@/components/common/ConfirmModal.vue'
 import CustomDropdown from '@/components/common/CustomDropdown.vue'
 import ActionDropdown from '@/components/common/ActionDropdown.vue'
-import GroupManagementModal from '@/components/accounts/GroupManagementModal.vue'
 import BalanceDisplay from '@/components/accounts/BalanceDisplay.vue'
-import AccountBalanceScriptModal from '@/components/accounts/AccountBalanceScriptModal.vue'
+
+const AccountForm = defineAsyncComponent(() => import('@/components/accounts/AccountForm.vue'))
+const CcrAccountForm = defineAsyncComponent(() => import('@/components/accounts/CcrAccountForm.vue'))
+const AccountUsageDetailModal = defineAsyncComponent(
+  () => import('@/components/accounts/AccountUsageDetailModal.vue')
+)
+const AccountErrorHistoryModal = defineAsyncComponent(
+  () => import('@/components/accounts/AccountErrorHistoryModal.vue')
+)
+const AccountExpiryEditModal = defineAsyncComponent(
+  () => import('@/components/accounts/AccountExpiryEditModal.vue')
+)
+const UnifiedTestModal = defineAsyncComponent(
+  () => import('@/components/common/UnifiedTestModal.vue')
+)
+const AccountScheduledTestModal = defineAsyncComponent(
+  () => import('@/components/accounts/AccountScheduledTestModal.vue')
+)
+const GroupManagementModal = defineAsyncComponent(
+  () => import('@/components/accounts/GroupManagementModal.vue')
+)
+const AccountBalanceScriptModal = defineAsyncComponent(
+  () => import('@/components/accounts/AccountBalanceScriptModal.vue')
+)
 
 // 确认弹窗状态
 const showConfirmModal = ref(false)
@@ -2430,6 +2445,7 @@ const bindingCountsLoaded = ref(false) // 轻量级绑定计数缓存
 const groupsLoaded = ref(false)
 const groupMembersLoaded = ref(false)
 const accountGroupMap = ref(new Map()) // Map<accountId, Array<groupInfo>>
+let activeLoadRequestId = 0
 
 // 下拉选项数据
 const sortOptions = ref([
@@ -2620,9 +2636,83 @@ const collectAccountSearchableStrings = (account) => {
 
 const accountMatchesKeyword = (account, normalizedKeyword) => {
   if (!normalizedKeyword) return true
-  return collectAccountSearchableStrings(account).some((value) =>
-    value.toLowerCase().includes(normalizedKeyword)
-  )
+  const searchable =
+    typeof account?.searchIndex === 'string'
+      ? account.searchIndex
+      : collectAccountSearchableStrings(account).join('\n').toLowerCase()
+  return searchable.includes(normalizedKeyword)
+}
+
+const buildAccountSearchIndex = (account) =>
+  collectAccountSearchableStrings(account)
+    .map((value) => value.toLowerCase())
+    .join('\n')
+
+const getBoundApiKeysCountForAccount = (account, counts = {}) => {
+  if (!account?.id) return 0
+
+  switch (account.platform) {
+    case 'claude':
+      return counts.claudeAccountId?.[account.id] || 0
+    case 'claude-console':
+      return counts.claudeConsoleAccountId?.[account.id] || 0
+    case 'gemini':
+      return counts.geminiAccountId?.[account.id] || 0
+    case 'gemini-api':
+      return counts.geminiAccountId?.[`api:${account.id}`] || 0
+    case 'openai':
+      return counts.openaiAccountId?.[account.id] || 0
+    case 'openai-responses':
+      return counts.openaiAccountId?.[`responses:${account.id}`] || 0
+    case 'azure_openai':
+      return counts.azureOpenaiAccountId?.[account.id] || 0
+    case 'droid':
+      return counts.droidAccountId?.[account.id] || account.boundApiKeysCount || 0
+    default:
+      return account.boundApiKeysCount || 0
+  }
+}
+
+const normalizeAccountForList = (account) => {
+  const proxyConfig = normalizeProxyData(account.proxyConfig || account.proxy)
+  return {
+    ...account,
+    proxyConfig: proxyConfig || null,
+    searchIndex: buildAccountSearchIndex(account)
+  }
+}
+
+const applyBindingCountsToAccounts = (requestId) => {
+  if (requestId !== activeLoadRequestId) return
+
+  const counts = bindingCounts.value || {}
+  accounts.value = accounts.value.map((account) => ({
+    ...account,
+    boundApiKeysCount: getBoundApiKeysCountForAccount(account, counts)
+  }))
+}
+
+const loadTempUnavailableStatuses = async (requestId) => {
+  try {
+    const tempRes = await httpApis.getTempUnavailableApi()
+    if (requestId !== activeLoadRequestId || !tempRes?.success || !tempRes.data) {
+      return
+    }
+
+    const tempStatuses = tempRes.data
+    accounts.value = accounts.value.map((account) => {
+      const tempStatus = resolveTempUnavailableStatusForAccount(tempStatuses, account)
+      if (tempStatus) {
+        return { ...account, tempUnavailable: tempStatus }
+      }
+      if (account.tempUnavailable) {
+        return { ...account, tempUnavailable: null }
+      }
+      return account
+    })
+  } catch {
+    // 忽略错误，不影响账户列表显示
+  }
 }
 
 const canViewUsage = (account) => !!account && supportedUsagePlatforms.includes(account.platform)
@@ -3249,7 +3339,7 @@ const cleanupSelectedAccounts = () => {
 }
 
 // 异步加载余额缓存（按平台批量拉取，避免逐行请求）
-const loadBalanceCacheForAccounts = async () => {
+const loadBalanceCacheForAccounts = async (requestId) => {
   const current = accounts.value
   if (!Array.isArray(current) || current.length === 0) {
     return
@@ -3284,7 +3374,7 @@ const loadBalanceCacheForAccounts = async () => {
     return map
   }, {})
 
-  if (Object.keys(balanceMap).length === 0) {
+  if (requestId !== activeLoadRequestId || Object.keys(balanceMap).length === 0) {
     return
   }
 
@@ -3296,6 +3386,7 @@ const loadBalanceCacheForAccounts = async () => {
 
 // 加载账户列表
 const loadAccounts = async (forceReload = false) => {
+  const requestId = ++activeLoadRequestId
   accountsLoading.value = true
   try {
     // 构建查询参数（用于其他筛选情况）
@@ -3309,8 +3400,17 @@ const loadAccounts = async (forceReload = false) => {
 
     const platformsToFetch = getPlatformsForFilter(platformFilter.value)
 
-    // 使用缓存机制加载绑定计数和分组数据（不再加载完整的 API Keys 数据）
-    await Promise.all([loadBindingCounts(forceReload), loadAccountGroups(forceReload)])
+    // 账户列表优先渲染，附加元数据在后台补齐
+    const bindingCountsPromise = loadBindingCounts(forceReload)
+      .then(() => {
+        applyBindingCountsToAccounts(requestId)
+      })
+      .catch((error) => {
+        console.debug('Binding counts loading failed:', error)
+      })
+    const accountGroupsPromise = loadAccountGroups(forceReload).catch((error) => {
+      console.debug('Account groups loading failed:', error)
+    })
 
     // 后端账户API已经包含分组信息，不需要单独加载分组成员关系
     // await loadGroupMembers(forceReload)
@@ -3350,7 +3450,6 @@ const loadAccounts = async (forceReload = false) => {
     }
 
     const allAccounts = []
-    const counts = bindingCounts.value || {}
     let openaiResponsesRaw = []
 
     const appendAccounts = (platform, data) => {
@@ -3360,7 +3459,10 @@ const loadAccounts = async (forceReload = false) => {
       switch (platform) {
         case 'claude': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.claudeAccountId?.[acc.id] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'claude' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'claude', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3368,7 +3470,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'claude-console': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.claudeConsoleAccountId?.[acc.id] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'claude-console' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'claude-console', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3381,7 +3486,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'gemini': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.geminiAccountId?.[acc.id] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'gemini' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'gemini', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3389,7 +3497,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'openai': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.openaiAccountId?.[acc.id] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'openai' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'openai', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3397,7 +3508,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'azure_openai': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.azureOpenaiAccountId?.[acc.id] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'azure_openai' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'azure_openai', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3414,7 +3528,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'droid': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.droidAccountId?.[acc.id] || acc.boundApiKeysCount || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'droid' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'droid', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3422,7 +3539,10 @@ const loadAccounts = async (forceReload = false) => {
         }
         case 'gemini-api': {
           const items = list.map((acc) => {
-            const boundApiKeysCount = counts.geminiAccountId?.[`api:${acc.id}`] || 0
+            const boundApiKeysCount = getBoundApiKeysCountForAccount(
+              { ...acc, platform: 'gemini-api' },
+              bindingCounts.value || {}
+            )
             return { ...acc, platform: 'gemini-api', boundApiKeysCount }
           })
           allAccounts.push(...items)
@@ -3441,7 +3561,10 @@ const loadAccounts = async (forceReload = false) => {
 
     if (openaiResponsesRaw.length > 0) {
       const responsesAccounts = openaiResponsesRaw.map((acc) => {
-        const boundApiKeysCount = counts.openaiAccountId?.[`responses:${acc.id}`] || 0
+        const boundApiKeysCount = getBoundApiKeysCountForAccount(
+          { ...acc, platform: 'openai-responses' },
+          bindingCounts.value || {}
+        )
         return { ...acc, platform: 'openai-responses', boundApiKeysCount }
       })
 
@@ -3468,56 +3591,46 @@ const loadAccounts = async (forceReload = false) => {
       }
     }
 
-    filteredAccounts = filteredAccounts.map((account) => {
-      const proxyConfig = normalizeProxyData(account.proxyConfig || account.proxy)
-      return {
-        ...account,
-        proxyConfig: proxyConfig || null
-      }
-    })
+    filteredAccounts = filteredAccounts.map(normalizeAccountForList)
 
-    // 获取临时不可用状态并附加到账户数据
-    try {
-      const tempRes = await httpApis.getTempUnavailableApi()
-      if (tempRes?.success && tempRes.data) {
-        const tempStatuses = tempRes.data
-        filteredAccounts = filteredAccounts.map((account) => {
-          const tempStatus = resolveTempUnavailableStatusForAccount(tempStatuses, account)
-          if (tempStatus) {
-            return { ...account, tempUnavailable: tempStatus }
-          }
-          return account
-        })
-      }
-    } catch {
-      // 忽略错误，不影响账户列表显示
+    if (requestId !== activeLoadRequestId) {
+      return
     }
 
     accounts.value = filteredAccounts
     cleanupSelectedAccounts()
 
+    void bindingCountsPromise
+    void accountGroupsPromise
+    void loadTempUnavailableStatuses(requestId)
+
     // 异步加载 Claude OAuth 账户的 usage 数据
     if (filteredAccounts.some((acc) => acc.platform === 'claude')) {
-      loadClaudeUsage().catch((err) => {
+      loadClaudeUsage(requestId).catch((err) => {
         console.debug('Claude usage loading failed:', err)
       })
     }
 
     // 异步加载余额缓存（按平台批量）
-    loadBalanceCacheForAccounts().catch((err) => {
+    loadBalanceCacheForAccounts(requestId).catch((err) => {
       console.debug('Balance cache loading failed:', err)
     })
   } catch (error) {
+    if (requestId !== activeLoadRequestId) {
+      return
+    }
     showToast('加载账户失败', 'error')
   } finally {
-    accountsLoading.value = false
+    if (requestId === activeLoadRequestId) {
+      accountsLoading.value = false
+    }
   }
 }
 
 // 异步加载 Claude 账户的 Usage 数据
-const loadClaudeUsage = async () => {
+const loadClaudeUsage = async (requestId) => {
   const response = await httpApis.getClaudeAccountsUsageApi()
-  if (response.success && response.data) {
+  if (requestId === activeLoadRequestId && response.success && response.data) {
     const usageMap = response.data
     accounts.value = accounts.value.map((account) => {
       if (account.platform === 'claude' && usageMap[account.id]) {

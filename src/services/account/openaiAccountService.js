@@ -722,7 +722,7 @@ async function getAllAccounts() {
       delete accountData.codexUsageUpdatedAt
 
       // 获取限流状态信息
-      const rateLimitInfo = await getAccountRateLimitInfo(accountData.id)
+      const rateLimitInfo = buildRateLimitInfoFromAccountData(accountData)
 
       // 解析代理配置
       if (accountData.proxy) {
@@ -1131,6 +1131,14 @@ async function toggleSchedulable(accountId) {
 // 获取账户限流信息
 async function getAccountRateLimitInfo(accountId) {
   const account = await getAccount(accountId)
+  if (!account) {
+    return null
+  }
+
+  return buildRateLimitInfoFromAccountData(account)
+}
+
+function buildRateLimitInfoFromAccountData(account) {
   if (!account) {
     return null
   }

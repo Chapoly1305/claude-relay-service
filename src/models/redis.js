@@ -2246,6 +2246,102 @@ class RedisClient {
     }
   }
 
+  async batchGetAccountUsageStats(accountIds, accountCreatedAtMap = null) {
+    if (!Array.isArray(accountIds) || accountIds.length === 0) {
+      return new Map()
+    }
+
+    const today = getDateStringInTimezone()
+    const tzDate = getDateInTimezone()
+    const currentMonth = `${tzDate.getUTCFullYear()}-${String(tzDate.getUTCMonth() + 1).padStart(
+      2,
+      '0'
+    )}`
+
+    const statsPipeline = this.client.pipeline()
+    for (const accountId of accountIds) {
+      statsPipeline.hgetall(`account_usage:${accountId}`)
+      statsPipeline.hgetall(`account_usage:daily:${accountId}:${today}`)
+      statsPipeline.hgetall(`account_usage:monthly:${accountId}:${currentMonth}`)
+    }
+
+    const [statsResults, dailyCostMap] = await Promise.all([
+      statsPipeline.exec(),
+      this.batchGetAccountDailyCost(accountIds)
+    ])
+
+    const resolveCreatedAt = (accountId) => {
+      if (!accountCreatedAtMap) return new Date()
+      if (accountCreatedAtMap instanceof Map) {
+        return accountCreatedAtMap.get(accountId) || new Date()
+      }
+      return accountCreatedAtMap[accountId] || new Date()
+    }
+
+    const parseUsage = (data = {}) => {
+      const tokens = parseInt(data.totalTokens) || parseInt(data.tokens) || 0
+      const inputTokens = parseInt(data.totalInputTokens) || parseInt(data.inputTokens) || 0
+      const outputTokens = parseInt(data.totalOutputTokens) || parseInt(data.outputTokens) || 0
+      const requests = parseInt(data.totalRequests) || parseInt(data.requests) || 0
+      const cacheCreateTokens =
+        parseInt(data.totalCacheCreateTokens) || parseInt(data.cacheCreateTokens) || 0
+      const cacheReadTokens =
+        parseInt(data.totalCacheReadTokens) || parseInt(data.cacheReadTokens) || 0
+      const allTokens = parseInt(data.totalAllTokens) || parseInt(data.allTokens) || 0
+
+      return {
+        tokens,
+        inputTokens,
+        outputTokens,
+        cacheCreateTokens,
+        cacheReadTokens,
+        allTokens: allTokens || inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens,
+        requests
+      }
+    }
+
+    const usageStatsMap = new Map()
+    for (let i = 0; i < accountIds.length; i++) {
+      const accountId = accountIds[i]
+      const [errTotal, total] = statsResults[i * 3]
+      const [errDaily, daily] = statsResults[i * 3 + 1]
+      const [errMonthly, monthly] = statsResults[i * 3 + 2]
+
+      const totalData = errTotal ? parseUsage() : parseUsage(total)
+      const dailyData = errDaily ? parseUsage() : parseUsage(daily)
+      const monthlyData = errMonthly ? parseUsage() : parseUsage(monthly)
+
+      const createdAtRaw = resolveCreatedAt(accountId)
+      const createdAt = createdAtRaw ? new Date(createdAtRaw) : new Date()
+      const now = new Date()
+      const daysSinceCreated = Math.max(
+        1,
+        Math.ceil((now - createdAt) / (1000 * 60 * 60 * 24))
+      )
+      const totalMinutes = Math.max(1, daysSinceCreated * 24 * 60)
+      const totalTokens = totalData.tokens || 0
+      const totalRequests = totalData.requests || 0
+
+      usageStatsMap.set(accountId, {
+        accountId,
+        total: totalData,
+        daily: {
+          ...dailyData,
+          cost: dailyCostMap.get(accountId) || 0
+        },
+        monthly: monthlyData,
+        averages: {
+          rpm: Math.round((totalRequests / totalMinutes) * 100) / 100,
+          tpm: Math.round((totalTokens / totalMinutes) * 100) / 100,
+          dailyRequests: Math.round((totalRequests / daysSinceCreated) * 100) / 100,
+          dailyTokens: Math.round((totalTokens / daysSinceCreated) * 100) / 100
+        }
+      })
+    }
+
+    return usageStatsMap
+  }
+
   // 📈 获取所有账户的使用统计
   async getAllAccountsUsageStats() {
     try {

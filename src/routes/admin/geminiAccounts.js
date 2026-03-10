@@ -163,18 +163,17 @@ router.get('/', authenticateAdmin, async (req, res) => {
       accounts = []
     }
 
+    const accountIds = accounts.map((account) => account.id)
+    const accountCreatedAtMap = new Map(accounts.map((account) => [account.id, account.createdAt]))
+    const [allGroupInfosMap, allUsageStatsMap] = await Promise.all([
+      accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'gemini'),
+      redis.batchGetAccountUsageStats(accountIds, accountCreatedAtMap)
+    ])
+
     // 如果指定了分组筛选
     if (groupId && groupId !== 'all') {
       if (groupId === 'ungrouped') {
-        // 筛选未分组账户
-        const filteredAccounts = []
-        for (const account of accounts) {
-          const groups = await accountGroupService.getAccountGroups(account.id)
-          if (!groups || groups.length === 0) {
-            filteredAccounts.push(account)
-          }
-        }
-        accounts = filteredAccounts
+        accounts = accounts.filter((account) => (allGroupInfosMap.get(account.id) || []).length === 0)
       } else {
         // 筛选特定分组的账户
         const groupMembers = await accountGroupService.getGroupMembers(groupId)
@@ -186,8 +185,8 @@ router.get('/', authenticateAdmin, async (req, res) => {
     const accountsWithStats = await Promise.all(
       accounts.map(async (account) => {
         try {
-          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
-          const groupInfos = await accountGroupService.getAccountGroups(account.id)
+          const usageStats = allUsageStatsMap.get(account.id)
+          const groupInfos = allGroupInfosMap.get(account.id) || []
 
           const formattedAccount = formatAccountExpiry(account)
           return {
@@ -206,7 +205,7 @@ router.get('/', authenticateAdmin, async (req, res) => {
           )
           // 如果获取统计失败，返回空统计
           try {
-            const groupInfos = await accountGroupService.getAccountGroups(account.id)
+            const groupInfos = allGroupInfosMap.get(account.id) || []
             const formattedAccount = formatAccountExpiry(account)
             return {
               ...formattedAccount,

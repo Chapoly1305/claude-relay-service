@@ -232,34 +232,23 @@ router.get('/', authenticateAdmin, async (req, res) => {
     const { platform, groupId } = req.query
     let accounts = await openaiAccountService.getAllAccounts()
 
-    // 缓存账户所属分组，避免重复查询
-    const accountGroupCache = new Map()
-    const fetchAccountGroups = async (accountId) => {
-      if (!accountGroupCache.has(accountId)) {
-        const groups = await accountGroupService.getAccountGroups(accountId)
-        accountGroupCache.set(accountId, groups || [])
-      }
-      return accountGroupCache.get(accountId)
-    }
-
     // 根据查询参数进行筛选
     if (platform && platform !== 'all' && platform !== 'openai') {
       // 如果指定了其他平台，返回空数组
       accounts = []
     }
 
+    const accountIds = accounts.map((account) => account.id)
+    const accountCreatedAtMap = new Map(accounts.map((account) => [account.id, account.createdAt]))
+    const [allGroupInfosMap, allUsageStatsMap] = await Promise.all([
+      accountGroupService.batchGetAccountGroupsByIndex(accountIds, 'openai'),
+      redis.batchGetAccountUsageStats(accountIds, accountCreatedAtMap)
+    ])
+
     // 如果指定了分组筛选
     if (groupId && groupId !== 'all') {
       if (groupId === 'ungrouped') {
-        // 筛选未分组账户
-        const filteredAccounts = []
-        for (const account of accounts) {
-          const groups = await fetchAccountGroups(account.id)
-          if (!groups || groups.length === 0) {
-            filteredAccounts.push(account)
-          }
-        }
-        accounts = filteredAccounts
+        accounts = accounts.filter((account) => (allGroupInfosMap.get(account.id) || []).length === 0)
       } else {
         // 筛选特定分组的账户
         const groupMembers = await accountGroupService.getGroupMembers(groupId)
@@ -271,8 +260,8 @@ router.get('/', authenticateAdmin, async (req, res) => {
     const accountsWithStats = await Promise.all(
       accounts.map(async (account) => {
         try {
-          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
-          const groupInfos = await fetchAccountGroups(account.id)
+          const usageStats = allUsageStatsMap.get(account.id)
+          const groupInfos = allGroupInfosMap.get(account.id) || []
           const formattedAccount = formatAccountExpiry(account)
           return {
             ...formattedAccount,
@@ -285,7 +274,7 @@ router.get('/', authenticateAdmin, async (req, res) => {
           }
         } catch (error) {
           logger.debug(`Failed to get usage stats for OpenAI account ${account.id}:`, error)
-          const groupInfos = await fetchAccountGroups(account.id)
+          const groupInfos = allGroupInfosMap.get(account.id) || []
           const formattedAccount = formatAccountExpiry(account)
           return {
             ...formattedAccount,

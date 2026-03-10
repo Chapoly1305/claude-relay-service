@@ -17,8 +17,8 @@
               : currentTab === 'overview'
                 ? '服务状态概览'
                 : currentTab === 'quota'
-                ? '额度卡'
-                : '使用教程'
+                  ? '额度卡'
+                  : '使用教程'
           "
           :title="oemSettings.siteName"
         />

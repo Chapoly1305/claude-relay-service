@@ -377,7 +377,9 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
 
 router.post('/global-proxy-pool/assign-missing', authenticateAdmin, async (req, res) => {
   try {
-    const result = await globalProxyPoolService.assignMissingProxiesToAllAccounts()
+    const result = await globalProxyPoolService.assignMissingProxiesToAllAccounts(
+      req.body?.globalProxyPool || null
+    )
     return res.json({
       success: true,
       message: `Assigned proxies to ${result.assignedCount} accounts`,

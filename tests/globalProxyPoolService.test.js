@@ -104,4 +104,14 @@ describe('GlobalProxyPoolService', () => {
     expect(result.assignedCount).toBe(1)
     expect(result.accountsByPlatform.claude.assigned).toBe(1)
   })
+
+  it('throws when batch assignment is requested while disabled', async () => {
+    await expect(
+      service.assignMissingProxiesToAllAccounts({
+        enabled: false,
+        autoAssignOnCreate: true,
+        proxies: [{ type: 'http', host: '127.0.0.1', port: 8080 }]
+      })
+    ).rejects.toThrow('Global proxy pool is disabled')
+  })
 })

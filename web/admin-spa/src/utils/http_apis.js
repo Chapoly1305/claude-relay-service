@@ -32,8 +32,8 @@ export const changePasswordApi = (data) =>
 export const getOemSettingsApi = () => request({ url: '/admin/oem-settings', method: 'GET' })
 export const updateOemSettingsApi = (data) =>
   request({ url: '/admin/oem-settings', method: 'PUT', data })
-export const assignMissingGlobalProxyPoolApi = () =>
-  request({ url: '/admin/global-proxy-pool/assign-missing', method: 'POST' })
+export const assignMissingGlobalProxyPoolApi = (data) =>
+  request({ url: '/admin/global-proxy-pool/assign-missing', method: 'POST', data })
 
 // 服务倍率配置（公开接口）
 export const getServiceRatesApi = () => request({ url: '/apiStats/service-rates', method: 'GET' })

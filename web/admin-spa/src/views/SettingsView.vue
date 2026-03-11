@@ -3410,7 +3410,9 @@ const assignMissingGlobalProxyPool = async () => {
 
   assigningGlobalProxyPool.value = true
   try {
-    const response = await httpApis.assignMissingGlobalProxyPoolApi()
+    const response = await httpApis.assignMissingGlobalProxyPoolApi({
+      globalProxyPool: buildGlobalProxyPoolPayload()
+    })
     if (response.success && isMounted.value) {
       showToast(`已分配 ${response.data?.assignedCount || 0} 个账号`, 'success')
     } else {

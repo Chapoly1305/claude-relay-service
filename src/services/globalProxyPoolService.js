@@ -243,19 +243,14 @@ class GlobalProxyPoolService {
     return cloneProxy(proxies[index])
   }
 
-  async assignMissingProxiesToAllAccounts() {
-    const config = await this.getConfig()
+  async assignMissingProxiesToAllAccounts(configOverride = null) {
+    const config = configOverride ? this.normalizeConfig(configOverride) : await this.getConfig()
     if (!config.enabled) {
-      return {
-        assignedCount: 0,
-        scannedCount: 0,
-        skippedCount: 0,
-        accountsByPlatform: {}
-      }
+      throw new Error('Global proxy pool is disabled')
     }
 
     if (config.proxies.length === 0) {
-      throw new Error('Global proxy pool is enabled but no proxies are configured')
+      throw new Error('Global proxy pool has no valid proxies configured')
     }
 
     const client = redis.getClientSafe()

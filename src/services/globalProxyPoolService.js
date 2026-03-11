@@ -163,6 +163,18 @@ function parseProxyLine(line) {
   return null
 }
 
+function tryParseStoredProxy(proxyValue) {
+  if (!proxyValue || typeof proxyValue !== 'string') {
+    return null
+  }
+
+  try {
+    return normalizeProxyObject(JSON.parse(proxyValue))
+  } catch (error) {
+    return null
+  }
+}
+
 class GlobalProxyPoolService {
   async getConfig() {
     const client = redis.getClientSafe()
@@ -303,6 +315,87 @@ class GlobalProxyPoolService {
         result.assignedCount++
         result.accountsByPlatform[source.platform].assigned++
       }
+    }
+
+    return result
+  }
+
+  async getAssignmentDebugSummary(configOverride = null, options = {}) {
+    const config = configOverride ? this.normalizeConfig(configOverride) : await this.getConfig()
+    const sampleSize = Math.max(1, Number.parseInt(options.sampleSize, 10) || 3)
+
+    const result = {
+      config: {
+        enabled: config.enabled,
+        autoAssignOnCreate: config.autoAssignOnCreate,
+        proxyCount: config.proxies.length,
+        updatedAt: config.updatedAt
+      },
+      totalAccounts: 0,
+      accountsWithProxy: 0,
+      accountsWithoutProxy: 0,
+      invalidRecords: 0,
+      accountsByPlatform: {}
+    }
+
+    for (const source of ACCOUNT_SOURCES) {
+      const accountIds = await redis.getAllIdsByIndex(
+        source.indexKey,
+        source.keyPattern,
+        source.idPattern
+      )
+
+      const platformSummary = {
+        total: accountIds.length,
+        withProxy: 0,
+        withoutProxy: 0,
+        invalidRecords: 0,
+        samplesWithProxy: [],
+        samplesWithoutProxy: []
+      }
+
+      result.totalAccounts += accountIds.length
+
+      if (accountIds.length === 0) {
+        result.accountsByPlatform[source.platform] = platformSummary
+        continue
+      }
+
+      const keys = accountIds.map((id) => `${source.keyPrefix}${id}`)
+      const records = await redis.batchHgetallChunked(keys)
+
+      for (let i = 0; i < records.length; i++) {
+        const record = records[i]
+        if (!record || Object.keys(record).length === 0) {
+          platformSummary.invalidRecords++
+          result.invalidRecords++
+          continue
+        }
+
+        const parsedProxy = tryParseStoredProxy(record.proxy)
+        if (parsedProxy) {
+          platformSummary.withProxy++
+          result.accountsWithProxy++
+          if (platformSummary.samplesWithProxy.length < sampleSize) {
+            platformSummary.samplesWithProxy.push({
+              id: accountIds[i],
+              proxy: parsedProxy
+            })
+          }
+          continue
+        }
+
+        platformSummary.withoutProxy++
+        result.accountsWithoutProxy++
+        if (platformSummary.samplesWithoutProxy.length < sampleSize) {
+          platformSummary.samplesWithoutProxy.push({
+            id: accountIds[i],
+            rawProxy: record.proxy || ''
+          })
+        }
+      }
+
+      result.accountsByPlatform[source.platform] = platformSummary
     }
 
     return result

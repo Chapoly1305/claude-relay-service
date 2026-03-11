@@ -175,6 +175,32 @@
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
 
+const createEmptyProxyState = () => ({
+  enabled: false,
+  type: 'socks5',
+  host: '',
+  port: '',
+  username: '',
+  password: ''
+})
+
+function normalizeProxyState(value) {
+  if (!value || typeof value !== 'object') {
+    return createEmptyProxyState()
+  }
+
+  const normalized = {
+    ...createEmptyProxyState(),
+    ...value
+  }
+
+  if (typeof normalized.enabled !== 'boolean') {
+    normalized.enabled = !!(normalized.host && normalized.port)
+  }
+
+  return normalized
+}
+
 const props = defineProps({
   modelValue: {
     type: Object,
@@ -192,7 +218,7 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 // 内部代理数据
-const proxy = ref({ ...props.modelValue })
+const proxy = ref(normalizeProxyState(props.modelValue))
 
 // UI状态
 const showAuth = ref(!!(proxy.value.username || proxy.value.password))
@@ -207,10 +233,11 @@ const parseSuccess = ref(false)
 watch(
   () => props.modelValue,
   (newVal) => {
+    const normalized = normalizeProxyState(newVal)
     // 只有当值真正不同时才更新，避免循环
-    if (JSON.stringify(newVal) !== JSON.stringify(proxy.value)) {
-      proxy.value = { ...newVal }
-      showAuth.value = !!(newVal.username || newVal.password)
+    if (JSON.stringify(normalized) !== JSON.stringify(proxy.value)) {
+      proxy.value = normalized
+      showAuth.value = !!(normalized.username || normalized.password)
     }
   },
   { deep: true }

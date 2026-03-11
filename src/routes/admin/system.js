@@ -395,6 +395,25 @@ router.post('/global-proxy-pool/assign-missing', authenticateAdmin, async (req, 
   }
 })
 
+router.get('/global-proxy-pool/debug', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await globalProxyPoolService.getAssignmentDebugSummary(null, {
+      sampleSize: req.query.sampleSize
+    })
+    return res.json({
+      success: true,
+      data: result
+    })
+  } catch (error) {
+    logger.error('❌ Failed to fetch global proxy pool debug summary:', error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch global proxy pool debug summary',
+      message: error.message
+    })
+  }
+})
+
 // ==================== 公开统计概览 ====================
 
 // 获取公开统计数据（无需认证，用于首页展示）

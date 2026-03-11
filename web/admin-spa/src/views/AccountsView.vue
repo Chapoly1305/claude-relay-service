@@ -2259,7 +2259,16 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick, defineAsyncComponent } from 'vue'
+import {
+  ref,
+  computed,
+  onMounted,
+  onUnmounted,
+  onActivated,
+  watch,
+  nextTick,
+  defineAsyncComponent
+} from 'vue'
 import { showToast, copyText, formatNumber, formatRelativeTime } from '@/utils/tools'
 
 import * as httpApis from '@/utils/http_apis'
@@ -4068,7 +4077,10 @@ const closeCreateAccountModal = () => {
 
 // 编辑账户
 const editAccount = (account) => {
-  editingAccount.value = account
+  editingAccount.value = {
+    ...account,
+    proxy: account.proxyConfig || account.proxy || null
+  }
   showEditAccountModal.value = true
 }
 
@@ -5376,6 +5388,10 @@ onMounted(() => {
 
   // 监听窗口大小变化
   window.addEventListener('resize', checkHorizontalScroll)
+})
+
+onActivated(() => {
+  loadAccounts(true)
 })
 
 onUnmounted(() => {

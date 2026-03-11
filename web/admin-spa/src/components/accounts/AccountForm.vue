@@ -4063,6 +4063,8 @@ const createDefaultProxyState = () => ({
   password: ''
 })
 
+const getAccountProxySource = (account) => account?.proxyConfig || account?.proxy || null
+
 const parseProxyResponse = (rawProxy) => {
   if (!rawProxy) {
     return null
@@ -4173,7 +4175,7 @@ const buildProxyPayload = (proxyState) => {
 
 // 初始化代理配置
 const initProxyConfig = () => {
-  return normalizeProxyFormState(props.account?.proxy)
+  return normalizeProxyFormState(getAccountProxySource(props.account))
 }
 
 const toFormCooldownOverrideValue = (value) => {
@@ -6280,7 +6282,7 @@ watch(
     if (newAccount) {
       initModelMappings()
       // 重新初始化代理配置
-      const proxyConfig = normalizeProxyFormState(newAccount.proxy)
+      const proxyConfig = normalizeProxyFormState(getAccountProxySource(newAccount))
       const normalizedAuthMethod =
         typeof newAccount.authenticationMethod === 'string'
           ? newAccount.authenticationMethod.trim().toLowerCase()

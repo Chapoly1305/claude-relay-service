@@ -11,6 +11,7 @@ const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const config = require('../../../config/config')
+const globalProxyPoolService = require('../../services/globalProxyPoolService')
 
 const router = express.Router()
 
@@ -223,6 +224,12 @@ const defaultOemSettings = {
     title: '',
     content: ''
   },
+  globalProxyPool: {
+    enabled: false,
+    autoAssignOnCreate: true,
+    proxies: [],
+    updatedAt: null
+  },
   updatedAt: new Date().toISOString()
 }
 
@@ -278,7 +285,8 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       publicStatsShowAccountTrends,
       publicStatsTrendsPeriod,
       publicStatsShowSessionWindow,
-      apiStatsNotice
+      apiStatsNotice,
+      globalProxyPool
     } = req.body
 
     // 验证输入
@@ -318,6 +326,13 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       ? publicStatsTrendsPeriod
       : '7d'
 
+    const normalizedProxyPool = globalProxyPoolService.normalizeConfig(globalProxyPool || {})
+    if (globalProxyPool?.enabled === true && normalizedProxyPool.proxies.length === 0) {
+      return res
+        .status(400)
+        .json({ error: 'Global proxy pool is enabled but no valid proxies were provided' })
+    }
+
     const settings = {
       siteName: siteName.trim(),
       siteIcon: (siteIcon || '').trim(),
@@ -337,6 +352,10 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
         title: (apiStatsNotice?.title || '').trim().slice(0, 100),
         content: (apiStatsNotice?.content || '').trim().slice(0, 2000)
       },
+      globalProxyPool: {
+        ...normalizedProxyPool,
+        updatedAt: new Date().toISOString()
+      },
       updatedAt: new Date().toISOString()
     }
 
@@ -353,6 +372,24 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
   } catch (error) {
     logger.error('❌ Failed to update OEM settings:', error)
     return res.status(500).json({ error: 'Failed to update OEM settings', message: error.message })
+  }
+})
+
+router.post('/global-proxy-pool/assign-missing', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await globalProxyPoolService.assignMissingProxiesToAllAccounts()
+    return res.json({
+      success: true,
+      message: `Assigned proxies to ${result.assignedCount} accounts`,
+      data: result
+    })
+  } catch (error) {
+    logger.error('❌ Failed to batch assign global proxy pool:', error)
+    return res.status(400).json({
+      success: false,
+      error: 'Failed to assign proxies from global proxy pool',
+      message: error.message
+    })
   }
 })
 
@@ -694,7 +731,7 @@ async function getPublicTrendData(settings, period = '7d') {
     tokenTrends: null,
     apiKeysTrends: null,
     accountTrends: null,
-    period: period
+    period
   }
 
   try {
@@ -752,7 +789,9 @@ async function getPublicTrendData(settings, period = '7d') {
           for (const key of keys) {
             // 从 key 中提取 keyId: usage:hourly:{keyId}:{hourKey}
             const match = key.match(/usage:hourly:([^:]+):\d{4}-\d{2}-\d{2}:\d{2}$/)
-            if (!match) continue
+            if (!match) {
+              continue
+            }
 
             const data = await client.hgetall(key)
             if (data) {
@@ -789,7 +828,9 @@ async function getPublicTrendData(settings, period = '7d') {
           for (const key of keys) {
             // 从 key 中提取 accountId: account_usage:hourly:{accountId}:{hourKey}
             const match = key.match(/account_usage:hourly:([^:]+):\d{4}-\d{2}-\d{2}:\d{2}$/)
-            if (!match) continue
+            if (!match) {
+              continue
+            }
 
             const data = await client.hgetall(key)
             if (data) {

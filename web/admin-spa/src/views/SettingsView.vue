@@ -292,6 +292,86 @@
                   </td>
                 </tr>
 
+                <tr class="border-b border-gray-100 dark:border-gray-700">
+                  <td class="w-48 whitespace-nowrap px-6 py-4 align-top">
+                    <div class="flex items-center">
+                      <div
+                        class="mr-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600"
+                      >
+                        <i class="fas fa-network-wired text-xs text-white" />
+                      </div>
+                      <div>
+                        <div class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          全局代理池
+                        </div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400">上游代理自动分配</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="px-6 py-4">
+                    <div class="space-y-4">
+                      <label class="inline-flex cursor-pointer items-center">
+                        <input
+                          v-model="oemSettings.globalProxyPool.enabled"
+                          class="peer sr-only"
+                          type="checkbox"
+                        />
+                        <div
+                          class="peer relative h-6 w-11 rounded-full bg-gray-200 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:border-gray-600 dark:bg-gray-700 dark:peer-focus:ring-blue-800"
+                        ></div>
+                        <span class="ml-3 text-sm font-medium text-gray-900 dark:text-gray-300">
+                          {{ oemSettings.globalProxyPool.enabled ? '已启用' : '已禁用' }}
+                        </span>
+                      </label>
+
+                      <label class="inline-flex cursor-pointer items-center">
+                        <input
+                          v-model="oemSettings.globalProxyPool.autoAssignOnCreate"
+                          class="peer sr-only"
+                          type="checkbox"
+                        />
+                        <div
+                          class="peer relative h-6 w-11 rounded-full bg-gray-200 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:border-gray-600 dark:bg-gray-700 dark:peer-focus:ring-blue-800"
+                        ></div>
+                        <span class="ml-3 text-sm font-medium text-gray-900 dark:text-gray-300">
+                          新建账号自动分配代理
+                        </span>
+                      </label>
+
+                      <div>
+                        <label class="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+                          代理列表
+                        </label>
+                        <textarea
+                          v-model="globalProxyPoolText"
+                          class="form-input min-h-[180px] w-full max-w-3xl font-mono text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                          placeholder="每行一个代理，支持 socks5://user:pass@host:1080 或 http,host,port,user,password"
+                          rows="7"
+                        ></textarea>
+                        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                          仅当账号未单独配置代理时生效。批量分配会为当前所有未配置代理的账号随机写入一条代理。
+                        </p>
+                      </div>
+
+                      <div class="flex gap-3">
+                        <button
+                          class="btn bg-cyan-50 px-4 py-2 text-cyan-700 hover:bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 dark:hover:bg-cyan-900/60"
+                          :class="{ 'cursor-not-allowed opacity-50': assigningGlobalProxyPool }"
+                          :disabled="assigningGlobalProxyPool"
+                          @click="assignMissingGlobalProxyPool"
+                        >
+                          <div v-if="assigningGlobalProxyPool" class="loading-spinner mr-2"></div>
+                          <i v-else class="fas fa-shuffle mr-2" />
+                          {{ assigningGlobalProxyPool ? '分配中...' : '为现有未配置账号批量分配' }}
+                        </button>
+                        <div class="self-center text-xs text-gray-500 dark:text-gray-400">
+                          当前有效代理数：{{ oemSettings.globalProxyPool?.proxies?.length || 0 }}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+
                 <!-- 操作按钮 -->
                 <tr>
                   <td class="px-6 py-6" colspan="2">
@@ -441,6 +521,75 @@
                 <p class="text-xs text-gray-500 dark:text-gray-400">
                   隐藏后，用户需要直接访问 /admin/login 页面登录
                 </p>
+              </div>
+            </div>
+
+            <div class="glass-card p-4">
+              <div class="mb-3 flex items-center gap-3">
+                <div
+                  class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-md"
+                >
+                  <i class="fas fa-network-wired"></i>
+                </div>
+                <div>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    全局代理池
+                  </h3>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    为未配置代理的账号自动随机分配上游代理
+                  </p>
+                </div>
+              </div>
+              <div class="space-y-3">
+                <label class="inline-flex cursor-pointer items-center">
+                  <input
+                    v-model="oemSettings.globalProxyPool.enabled"
+                    class="peer sr-only"
+                    type="checkbox"
+                  />
+                  <div
+                    class="peer relative h-6 w-11 rounded-full bg-gray-200 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:border-gray-600 dark:bg-gray-700 dark:peer-focus:ring-blue-800"
+                  ></div>
+                  <span class="ml-3 text-sm font-medium text-gray-900 dark:text-gray-300">
+                    {{ oemSettings.globalProxyPool.enabled ? '已启用' : '已禁用' }}
+                  </span>
+                </label>
+
+                <label class="inline-flex cursor-pointer items-center">
+                  <input
+                    v-model="oemSettings.globalProxyPool.autoAssignOnCreate"
+                    class="peer sr-only"
+                    type="checkbox"
+                  />
+                  <div
+                    class="peer relative h-6 w-11 rounded-full bg-gray-200 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:border-gray-600 dark:bg-gray-700 dark:peer-focus:ring-blue-800"
+                  ></div>
+                  <span class="ml-3 text-sm font-medium text-gray-900 dark:text-gray-300">
+                    新建账号自动分配代理
+                  </span>
+                </label>
+
+                <textarea
+                  v-model="globalProxyPoolText"
+                  class="form-input min-h-[180px] w-full font-mono text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                  placeholder="每行一个代理，支持 socks5://user:pass@host:1080 或 http,host,port,user,password"
+                  rows="7"
+                ></textarea>
+
+                <div class="text-xs text-gray-500 dark:text-gray-400">
+                  当前有效代理数：{{ oemSettings.globalProxyPool?.proxies?.length || 0 }}
+                </div>
+
+                <button
+                  class="btn w-full bg-cyan-50 px-4 py-2 text-cyan-700 hover:bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 dark:hover:bg-cyan-900/60"
+                  :class="{ 'cursor-not-allowed opacity-50': assigningGlobalProxyPool }"
+                  :disabled="assigningGlobalProxyPool"
+                  @click="assignMissingGlobalProxyPool"
+                >
+                  <div v-if="assigningGlobalProxyPool" class="loading-spinner mr-2"></div>
+                  <i v-else class="fas fa-shuffle mr-2" />
+                  {{ assigningGlobalProxyPool ? '分配中...' : '为现有未配置账号批量分配' }}
+                </button>
               </div>
             </div>
 
@@ -2145,6 +2294,8 @@ const isMounted = ref(true)
 
 // API请求取消控制器
 const abortController = ref(new AbortController())
+const globalProxyPoolText = ref('')
+const assigningGlobalProxyPool = ref(false)
 
 // ConfirmModal 状态
 const showConfirmModal = ref(false)
@@ -2416,6 +2567,7 @@ const isPlatformFormValid = computed(() => {
 onMounted(async () => {
   try {
     await settingsStore.loadOemSettings()
+    syncGlobalProxyPoolText()
     if (activeSection.value === 'webhook') {
       await loadWebhookConfig()
     }
@@ -3118,6 +3270,39 @@ const getNotificationTypeDescription = (type) => {
   return descriptions[type] || ''
 }
 
+const formatProxyPoolLines = (proxies = []) => {
+  if (!Array.isArray(proxies) || proxies.length === 0) {
+    return ''
+  }
+
+  return proxies
+    .map((proxy) => {
+      if (!proxy || typeof proxy !== 'object') {
+        return ''
+      }
+
+      const username = proxy.username ? encodeURIComponent(proxy.username) : ''
+      const password = proxy.password ? encodeURIComponent(proxy.password) : ''
+      const auth = username ? `${username}${password ? `:${password}` : ''}@` : ''
+      return `${proxy.type}://${auth}${proxy.host}:${proxy.port}`
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+const syncGlobalProxyPoolText = () => {
+  globalProxyPoolText.value = formatProxyPoolLines(oemSettings.value.globalProxyPool?.proxies || [])
+}
+
+const buildGlobalProxyPoolPayload = () => ({
+  enabled: oemSettings.value.globalProxyPool?.enabled === true,
+  autoAssignOnCreate: oemSettings.value.globalProxyPool?.autoAssignOnCreate !== false,
+  proxies: globalProxyPoolText.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+})
+
 // 保存OEM设置
 const saveOemSettings = async () => {
   try {
@@ -3135,10 +3320,12 @@ const saveOemSettings = async () => {
       publicStatsShowAccountTrends: oemSettings.value.publicStatsShowAccountTrends,
       publicStatsTrendsPeriod: oemSettings.value.publicStatsTrendsPeriod || '7d',
       publicStatsShowSessionWindow: oemSettings.value.publicStatsShowSessionWindow,
-      apiStatsNotice: oemSettings.value.apiStatsNotice
+      apiStatsNotice: oemSettings.value.apiStatsNotice,
+      globalProxyPool: buildGlobalProxyPoolPayload()
     }
     const result = await settingsStore.saveOemSettings(settings)
     if (result && result.success) {
+      syncGlobalProxyPoolText()
       showToast('OEM设置保存成功', 'success')
     } else {
       showToast(result?.message || '保存失败', 'error')
@@ -3164,6 +3351,7 @@ const resetOemSettings = async () => {
   try {
     const result = await settingsStore.resetOemSettings()
     if (result && result.success) {
+      syncGlobalProxyPoolText()
       showToast('已重置为默认设置', 'success')
     } else {
       showToast('重置失败', 'error')
@@ -3206,6 +3394,36 @@ const removeIcon = () => {
 // 处理图标加载错误
 const handleIconError = () => {
   console.warn('Icon failed to load')
+}
+
+const assignMissingGlobalProxyPool = async () => {
+  if (!isMounted.value) return
+
+  if (
+    !(await showConfirm(
+      '批量分配代理',
+      '将为所有未配置代理的账号随机分配全局代理池中的代理，是否继续？'
+    ))
+  ) {
+    return
+  }
+
+  assigningGlobalProxyPool.value = true
+  try {
+    const response = await httpApis.assignMissingGlobalProxyPoolApi()
+    if (response.success && isMounted.value) {
+      showToast(`已分配 ${response.data?.assignedCount || 0} 个账号`, 'success')
+    } else {
+      showToast(response?.message || '批量分配失败', 'error')
+    }
+  } catch (error) {
+    if (!isMounted.value) return
+    showToast(error?.message || '批量分配失败', 'error')
+  } finally {
+    if (isMounted.value) {
+      assigningGlobalProxyPool.value = false
+    }
+  }
 }
 
 // 格式化日期时间

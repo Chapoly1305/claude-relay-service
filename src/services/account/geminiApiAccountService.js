@@ -5,6 +5,7 @@ const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 class GeminiApiAccountService {
   constructor() {
@@ -48,6 +49,7 @@ class GeminiApiAccountService {
       rateLimitDuration = 60, // 限流时间（分钟）
       disableAutoProtection = false
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     // 验证必填字段
     if (!apiKey) {
@@ -67,7 +69,7 @@ class GeminiApiAccountService {
       baseUrl: normalizedBaseUrl,
       apiKey: this._encryptSensitiveData(apiKey),
       priority: priority.toString(),
-      proxy: proxy ? JSON.stringify(proxy) : '',
+      proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
       isActive: isActive.toString(),
       accountType,
       schedulable: schedulable.toString(),
@@ -95,6 +97,7 @@ class GeminiApiAccountService {
 
     return {
       ...accountData,
+      proxy: assignedProxy,
       apiKey: '***' // 返回时隐藏敏感信息
     }
   }

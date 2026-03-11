@@ -5,6 +5,7 @@ const ProxyHelper = require('../../utils/proxyHelper')
 const config = require('../../../config/config')
 const logger = require('../../utils/logger')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 // const { maskToken } = require('../../utils/tokenMask')
 const {
   logRefreshStart,
@@ -437,6 +438,7 @@ async function refreshAccountToken(accountId) {
 async function createAccount(accountData) {
   const accountId = uuidv4()
   const now = new Date().toISOString()
+  const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(accountData.proxy)
 
   // 处理OAuth数据
   let oauthData = {}
@@ -508,9 +510,9 @@ async function createAccount(accountData) {
   }
 
   // 代理配置
-  if (accountData.proxy) {
+  if (assignedProxy) {
     account.proxy =
-      typeof accountData.proxy === 'string' ? accountData.proxy : JSON.stringify(accountData.proxy)
+      typeof assignedProxy === 'string' ? assignedProxy : JSON.stringify(assignedProxy)
   }
 
   const client = redisClient.getClientSafe()

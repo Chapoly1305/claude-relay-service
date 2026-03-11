@@ -19,6 +19,12 @@ export const useSettingsStore = defineStore('settings', () => {
     publicStatsTrendsPeriod: '7d', // 使用趋势时间范围: today, 24h, 7d, 30d
     publicStatsShowSessionWindow: false, // 是否显示账户会话窗口（负载情况）
     apiStatsNotice: { enabled: false, title: '', content: '' },
+    globalProxyPool: {
+      enabled: false,
+      autoAssignOnCreate: true,
+      proxies: [],
+      updatedAt: null
+    },
     updatedAt: null
   })
 
@@ -63,6 +69,12 @@ export const useSettingsStore = defineStore('settings', () => {
       publicStatsTrendsPeriod: '7d',
       publicStatsShowSessionWindow: false,
       apiStatsNotice: { enabled: false, title: '', content: '' },
+      globalProxyPool: {
+        enabled: false,
+        autoAssignOnCreate: true,
+        proxies: [],
+        updatedAt: null
+      },
       updatedAt: null
     }
 

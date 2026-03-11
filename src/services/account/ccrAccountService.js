@@ -4,6 +4,7 @@ const redis = require('../../models/redis')
 const logger = require('../../utils/logger')
 const { createEncryptor } = require('../../utils/commonHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 class CcrAccountService {
   constructor() {
@@ -43,6 +44,7 @@ class CcrAccountService {
       quotaResetTime = '00:00', // 额度重置时间（HH:mm格式）
       disableAutoProtection = false // 是否关闭自动防护（429/401/400/529 不自动禁用）
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     // 验证必填字段
     if (!apiUrl || !apiKey) {
@@ -65,7 +67,7 @@ class CcrAccountService {
       supportedModels: JSON.stringify(processedModels),
       userAgent,
       rateLimitDuration: rateLimitDuration.toString(),
-      proxy: proxy ? JSON.stringify(proxy) : '',
+      proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
       isActive: isActive.toString(),
       accountType,
 
@@ -118,7 +120,7 @@ class CcrAccountService {
       userAgent,
       rateLimitDuration,
       isActive,
-      proxy,
+      proxy: assignedProxy,
       accountType,
       status: 'active',
       createdAt: accountData.createdAt,

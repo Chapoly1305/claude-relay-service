@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const config = require('../../../config/config')
 const logger = require('../../utils/logger')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 // 加密相关常量
 const ALGORITHM = 'aes-256-cbc'
@@ -113,6 +114,7 @@ function decrypt(text) {
 async function createAccount(accountData) {
   const accountId = uuidv4()
   const now = new Date().toISOString()
+  const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(accountData.proxy)
 
   const account = {
     id: accountId,
@@ -148,9 +150,9 @@ async function createAccount(accountData) {
   }
 
   // 代理配置
-  if (accountData.proxy) {
+  if (assignedProxy) {
     account.proxy =
-      typeof accountData.proxy === 'string' ? accountData.proxy : JSON.stringify(accountData.proxy)
+      typeof assignedProxy === 'string' ? assignedProxy : JSON.stringify(assignedProxy)
   }
 
   const client = redisClient.getClientSafe()

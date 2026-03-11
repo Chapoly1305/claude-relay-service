@@ -6,6 +6,7 @@ const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 class ClaudeConsoleAccountService {
   constructor() {
@@ -72,6 +73,7 @@ class ClaudeConsoleAccountService {
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
       interceptWarmup = false // 拦截预热请求（标题生成、Warmup等）
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     // 验证必填字段
     if (!apiUrl || !apiKey) {
@@ -94,7 +96,7 @@ class ClaudeConsoleAccountService {
       supportedModels: JSON.stringify(processedModels),
       userAgent,
       rateLimitDuration: rateLimitDuration.toString(),
-      proxy: proxy ? JSON.stringify(proxy) : '',
+      proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
       isActive: isActive.toString(),
       accountType,
       createdAt: new Date().toISOString(),
@@ -149,7 +151,7 @@ class ClaudeConsoleAccountService {
       userAgent,
       rateLimitDuration,
       isActive,
-      proxy,
+      proxy: assignedProxy,
       accountType,
       status: 'active',
       createdAt: accountData.createdAt,

@@ -7,6 +7,7 @@ const { maskToken } = require('../../utils/tokenMask')
 const ProxyHelper = require('../../utils/proxyHelper')
 const { createEncryptor, isTruthy } = require('../../utils/commonHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 /**
  * Droid 账户管理服务
@@ -480,6 +481,7 @@ class DroidAccountService {
       userAgent = '', // 自定义 User-Agent
       disableAutoProtection = false // 是否关闭自动防护（429/401/400/529 不自动禁用）
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     const accountId = uuidv4()
 
@@ -535,11 +537,11 @@ class DroidAccountService {
     }
 
     let proxyConfig = null
-    if (proxy && typeof proxy === 'object') {
-      proxyConfig = proxy
-    } else if (typeof proxy === 'string' && proxy.trim()) {
+    if (assignedProxy && typeof assignedProxy === 'object') {
+      proxyConfig = assignedProxy
+    } else if (typeof assignedProxy === 'string' && assignedProxy.trim()) {
       try {
-        proxyConfig = JSON.parse(proxy)
+        proxyConfig = JSON.parse(assignedProxy)
       } catch (error) {
         logger.warn('⚠️ Droid 代理配置解析失败，已忽略:', error.message)
         proxyConfig = null
@@ -727,7 +729,7 @@ class DroidAccountService {
       // ✅ 新增：账户订阅到期时间（业务字段，手动管理）
       subscriptionExpiresAt: options.subscriptionExpiresAt || null,
 
-      proxy: proxy ? JSON.stringify(proxy) : '',
+      proxy: proxyConfig ? JSON.stringify(proxyConfig) : '',
       isActive: isActive.toString(),
       accountType,
       platform,

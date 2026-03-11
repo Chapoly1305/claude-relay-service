@@ -23,6 +23,7 @@ const {
   normalizeOptionalNonNegativeInteger,
   normalizeTempUnavailablePolicyInput
 } = require('../../utils/tempUnavailablePolicy')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 /**
  * Check if account is Pro (not Max)
@@ -104,6 +105,7 @@ class ClaudeAccountService {
       tempUnavailable503TtlSeconds = null, // 账号级 503 冷却秒数（null 跟随全局）
       tempUnavailable5xxTtlSeconds = null // 账号级 5xx 冷却秒数（null 跟随全局）
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     const accountId = uuidv4()
     const normalizedTempUnavailablePolicy = normalizeTempUnavailablePolicyInput({
@@ -130,7 +132,7 @@ class ClaudeAccountService {
         refreshToken: this._encryptSensitiveData(claudeAiOauth.refreshToken),
         expiresAt: claudeAiOauth.expiresAt.toString(),
         scopes: claudeAiOauth.scopes.join(' '),
-        proxy: proxy ? JSON.stringify(proxy) : '',
+        proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
         isActive: isActive.toString(),
         accountType, // 账号类型：'dedicated' 或 'shared' 或 'group'
         platform,
@@ -176,7 +178,7 @@ class ClaudeAccountService {
         accessToken: '',
         expiresAt: '',
         scopes: '',
-        proxy: proxy ? JSON.stringify(proxy) : '',
+        proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
         isActive: isActive.toString(),
         accountType, // 账号类型：'dedicated' 或 'shared' 或 'group'
         platform,
@@ -217,7 +219,7 @@ class ClaudeAccountService {
 
       if (hasProfileScope) {
         try {
-          const agent = this._createProxyAgent(proxy)
+          const agent = this._createProxyAgent(assignedProxy)
           await this.fetchAndUpdateAccountProfile(accountId, claudeAiOauth.accessToken, agent)
           logger.info(`📊 Successfully fetched profile info for new account: ${name}`)
         } catch (profileError) {
@@ -234,7 +236,7 @@ class ClaudeAccountService {
       description,
       email,
       isActive,
-      proxy,
+      proxy: assignedProxy,
       accountType,
       platform,
       priority,

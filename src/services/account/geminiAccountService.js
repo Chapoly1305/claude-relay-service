@@ -17,6 +17,7 @@ const {
 const tokenRefreshService = require('../tokenRefreshService')
 const { createEncryptor } = require('../../utils/commonHelper')
 const antigravityClient = require('../antigravityClient')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 // Gemini 账户键前缀
 const GEMINI_ACCOUNT_KEY_PREFIX = 'gemini_account:'
@@ -444,6 +445,7 @@ async function refreshAccessToken(refreshToken, proxyConfig = null, oauthProvide
 async function createAccount(accountData) {
   const id = uuidv4()
   const now = new Date().toISOString()
+  const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(accountData.proxy)
   const oauthProvider = normalizeOauthProvider(accountData.oauthProvider)
   const oauthConfig = getOauthProviderConfig(oauthProvider)
 
@@ -513,7 +515,7 @@ async function createAccount(accountData) {
     subscriptionExpiresAt: accountData.subscriptionExpiresAt || null,
 
     // 代理设置
-    proxy: accountData.proxy ? JSON.stringify(accountData.proxy) : '',
+    proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
 
     // 项目 ID（Google Cloud/Workspace 账号需要）
     projectId: accountData.projectId || '',

@@ -5,6 +5,7 @@ const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const globalProxyPoolService = require('../globalProxyPoolService')
 
 class OpenAIResponsesAccountService {
   constructor() {
@@ -54,6 +55,7 @@ class OpenAIResponsesAccountService {
       disableAutoProtection = false, // 是否关闭自动防护（429/401/400/529 不自动禁用）
       providerEndpoint = 'responses' // Provider 端点类型：responses | auto
     } = options
+    const assignedProxy = await globalProxyPoolService.assignProxyIfNeeded(proxy)
 
     // 验证必填字段
     if (!baseApi || !apiKey) {
@@ -82,7 +84,7 @@ class OpenAIResponsesAccountService {
       apiKey: this._encryptSensitiveData(apiKey),
       userAgent,
       priority: priority.toString(),
-      proxy: proxy ? JSON.stringify(proxy) : '',
+      proxy: assignedProxy ? JSON.stringify(assignedProxy) : '',
       isActive: isActive.toString(),
       accountType,
       schedulable: schedulable.toString(),
@@ -116,6 +118,7 @@ class OpenAIResponsesAccountService {
 
     return {
       ...accountData,
+      proxy: assignedProxy,
       apiKey: '***' // 返回时隐藏敏感信息
     }
   }
